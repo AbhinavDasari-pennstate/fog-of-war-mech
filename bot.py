@@ -126,6 +126,7 @@ class Bot:
         self.lt_t = -99.0       # last time a laser target was in view
         self.lt_aim = None      # the aim we had on it
         self._los_cache = {}    # mech id -> line of fire clear, per decision
+        self.clear_t = {}       # mech id -> last time we had a clear line to it (target hysteresis)
         self.errors = 0
         self.edge_until = -99.0
         self.dodge_t = -99.0
@@ -246,7 +247,18 @@ class Bot:
         try:
             if mechs is None:
                 mechs = [m for m in obs["mechs"] if m.get("kind") == "mech"]
-            keep = {id(m) for m in (seen_mechs or mechs)}
+            cand = seen_mechs or mechs
+            # shoot what we can hit: a clear line wins over a better-scored mech behind a wall
+            # ponytail: nearest 4 only (each ray costs time); none clear = old choice (turn to the best)
+            t = obs["t"]
+            shootable = []
+            for m in cand[:4]:
+                if self.los_clear(obs["self"], m):
+                    self.clear_t[m.get("id")] = t
+                    shootable.append(m)
+                elif t - self.clear_t.get(m.get("id"), -99.0) < 0.3:  # just went behind a wall edge: no flicker
+                    shootable.append(m)
+            keep = {id(m) for m in (shootable or cand)}
             drones = {id(m) for m in hitters}
             use = dict(obs, mechs=[m for m in obs["mechs"] if (
                 id(m) in keep if m.get("kind") == "mech" else (not hitters or id(m) in drones))])

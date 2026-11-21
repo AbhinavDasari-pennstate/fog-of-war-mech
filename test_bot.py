@@ -1478,6 +1478,30 @@ class TestAimWiring(Base):
         a = self.act(make_obs(tick=2, t=30.1, weapons=[gun(), laser(charge=0.0)], mechs=[]))
         self.assertFalse(a["fire"][1])
 
+    def test_a_mech_we_can_hit_beats_a_better_scored_one_behind_a_wall(self):
+        hidden = mech(5, (60, 0, 0))
+        hidden["hp"] = 300  # wounded and closer: the aim module's favourite
+        open_ = mech(6, (100, 60, 0))
+        self.bot.los_clear = lambda me, m: m.get("id") != 5
+        a = self.act(make_obs(weapons=[gun(), laser()], mechs=[hidden, open_]))
+        self.assertLess(abs(a["aim"][0] - math.atan2(60, 100)), 0.05)  # aims at the one it can hit
+
+    def test_a_line_toggling_at_a_wall_edge_does_not_flip_the_target(self):
+        hidden = mech(5, (60, 0, 0))
+        hidden["hp"] = 300
+        open_ = mech(6, (100, 60, 0))
+        for k in range(8):  # mech 5's line toggles every tick (0.1 s)
+            self.bot.los_clear = (lambda me, m, k=k: m.get("id") != 5 or k % 2 == 0)
+            a = self.act(make_obs(t=30 + 0.1 * k, tick=k + 1, weapons=[gun(), laser()], mechs=[hidden, open_]))
+            self.assertLess(abs(a["aim"][0]), 0.05, f"tick {k}")  # stays on mech 5
+
+    def test_all_blocked_keeps_the_old_target_choice(self):
+        hidden = mech(5, (60, 0, 0))
+        hidden["hp"] = 300
+        self.bot.los_clear = lambda me, m: False
+        a = self.act(make_obs(weapons=[gun(), laser()], mechs=[hidden, mech(6, (100, 60, 0))]))
+        self.assertLess(abs(a["aim"][0]), 0.05)  # still turns to the best target
+
     def test_reload_comes_from_the_aim_plan_and_the_v3_rule(self):
         a = self.act(make_obs(weapons=[gun(ammo=0), None], mechs=[mech(5, (100, 0, 0))]))
         self.assertTrue(a.get("reload"))
