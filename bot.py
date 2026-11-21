@@ -15,6 +15,10 @@ try:
 except Exception:  # fight tactics missing: v3 flee
     fightlib = None
 try:
+    import loot_mem as lootlib
+except Exception:  # pickup memory missing: obs pickups only
+    lootlib = None
+try:
     import chase as chaselib
 except Exception:  # chase module missing or broken: no chasing
     chaselib = None
@@ -131,6 +135,8 @@ class Bot:
         self.edge_until = -99.0
         self.dodge_t = -99.0
         self.fight = fightlib.Fight() if fightlib is not None else None
+        self.loot = lootlib.LootMemory() if lootlib is not None else None
+        self.loot_errors = 0
         self.fight_errors = 0
         self.chaser = chaselib.Chase() if chaselib is not None else None
         self.chase_errors = 0
@@ -410,15 +416,16 @@ class Bot:
             cand = [p for p in obs.get("pickups", [])
                     if p["kind"] == kind and p["id"] not in self.skip and abs(p["pos"][2] - z) < 10
                     and math.hypot(p["pos"][0] - ccx, p["pos"][1] - ccy) < cr - 15]
+            give_up = lootlib.GRAB_GIVE_UP_S if lootlib is not None else 15.0
+            for p in [p for p in cand if t - self.chase.get(p["id"], t) > give_up]:
+                self.skip.add(p["id"])  # went for it long ago and still not there (roof, wall): stop trying
+            cand = [p for p in cand if p["id"] not in self.skip]
             if cand:
                 best = min(cand, key=lambda p: math.dist(p["pos"][:2], (x, y)))
                 break
         if best is None:
             return None
-        first = self.chase.setdefault(best["id"], t)  # first time we went for it; kept if it leaves view
-        if t - first > 15:  # cannot reach it (roof, wall): stop trying
-            self.skip.add(best["id"])
-            return None
+        self.chase.setdefault(best["id"], t)  # first time we went for it; kept if it leaves view
         return best
 
     def pick_drop(self, obs, me, mechs, ccx, ccy, cr):
@@ -448,6 +455,7 @@ class Bot:
         snap = {k: getattr(self, k) for k in STATE}
         sets = (set(self.skip), dict(self.fails), dict(self.chase), dict(self.hit_by), dict(self.hit_on))
         fsnap = dict(vars(self.fight), threats=dict(self.fight.threats)) if self.fight is not None else None
+        lsnap = dict(self.loot.seen) if self.loot is not None else None
         csnap = self.chaser.state() if self.chaser is not None else None
         try:
             return self._decide(obs)
@@ -460,6 +468,8 @@ class Bot:
         self.skip, self.fails, self.chase, self.hit_by, self.hit_on = sets
         if fsnap is not None:
             vars(self.fight).update(fsnap)
+        if lsnap is not None:
+            self.loot.seen = lsnap
         if csnap is not None:
             self.chaser.restore(csnap)
         self.lite = True
@@ -568,7 +578,12 @@ class Bot:
         mort_i = slot["mortar"][0] if "mortar" in slot else None
         empty = [i for i in (0, 1) if ws[i] is None]
         grab_kinds = [k for k in GRAB_KINDS if k not in slot]  # never take a kind we already hold
-        want_weapon = bool(grab_kinds) and (bool(empty) or mort_i is not None)
+        swap_i = None  # a laser may replace a held lightning (loot_mem.SWAP_LIGHTNING)
+        if (lootlib is not None and lootlib.SWAP_LIGHTNING and not empty and mort_i is None
+                and "lightning" in slot and "laser" not in slot):
+            swap_i = slot["lightning"][0]
+            grab_kinds = ["laser"]
+        want_weapon = bool(grab_kinds) and (bool(empty) or mort_i is not None or swap_i is not None)
 
         # ---- where to stand: the quiet outer part of the circle the zone is closing to ----
         zone = obs["zone"]
@@ -587,7 +602,15 @@ class Bot:
             mx, my = unit(cx - x, cy - y)
 
         # ---- goal: a laser (else lightning), else a supply drop; beats zone positioning unless outside the zone ----
-        grab = self.pick_grab(obs, me, ccx, ccy, cr, t, grab_kinds) if want_weapon else None
+        seen_obs = obs  # pickups seen in the last loot_mem.LOOT_MEM_S, not only the ones in view now
+        if self.loot is not None and not self.lite and lootlib.LOOT_MEM_S > 0 and self.loot_errors == 0:
+            try:
+                self.loot.update(obs, me, self.vis_near)
+                seen_obs = dict(obs, pickups=self.loot.pickups())
+            except Exception:
+                self.loot_errors += 1  # broken once: obs pickups only for the rest of the match
+                mf.log(f"loot memory failed, obs pickups from now on: {traceback.format_exc()}")
+        grab = self.pick_grab(seen_obs, me, ccx, ccy, cr, t, grab_kinds) if want_weapon else None
         drop = None if grab is not None else self.pick_drop(obs, me, mechs, ccx, ccy, cr)
         # ---- after a kill: walk to its pile (economy.py), then rest without firing so regen starts ----
         loot, rest = None, False
@@ -715,6 +738,8 @@ class Bot:
                     act["take"] = min(near, key=lambda p: math.dist(p["pos"][:2], (x, y)))["id"]
                     if not empty and mort_i is not None:
                         act["drop"] = mort_i
+                    elif not empty and swap_i is not None:
+                        act["drop"] = swap_i
                     break
             else:
                 if mort_i is not None and calm:

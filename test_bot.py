@@ -186,12 +186,21 @@ class TestWeaponGrab(Base):
         pk = [pickup(1, "lightning", (20, 0, 0)), pickup(2, "laser", (0, 70, 0)), pickup(3, "mortar", (5, 5, 0))]
         a = self.act(make_obs(t=3, pickups=pk, zone=self.ZONE))
         self.assertGreater(a["move"][1], 0.9)
+        self.bot = Bot(HELLO)  # fresh: the first bot remembers the laser (loot_mem)
         a = self.act(make_obs(t=3, pickups=pk[:1] + pk[2:], zone=self.ZONE))
         self.assertGreater(a["move"][0], 0.9)
 
-    def test_c3_no_grab_when_slot_one_is_full(self):
+    def test_c3_laser_replaces_a_held_lightning_but_nothing_else(self):
         a = self.act(make_obs(t=3, weapons=[gun(), lightning()], pickups=[pickup(1, "laser", (60, 0, 0))], zone=self.ZONE))
-        self.assertLess(a["move"][0], 0)
+        self.assertGreater(a["move"][0], 0.9)  # loot_mem.SWAP_LIGHTNING: go for the laser
+        a = self.act(make_obs(t=3, weapons=[gun(), lightning()], pickups=[pickup(1, "laser", (2, 0, 0))]))
+        self.assertEqual((a.get("take"), a.get("drop")), (1, 1))  # lightning (slot 1) out, laser in
+        self.bot = Bot(HELLO)
+        a = self.act(make_obs(t=3, weapons=[gun(), laser()], pickups=[pickup(1, "lightning", (2, 0, 0))]))
+        self.assertNotIn("take", a)
+        self.addCleanup(setattr, botmod.lootlib, "SWAP_LIGHTNING", botmod.lootlib.SWAP_LIGHTNING)
+        botmod.lootlib.SWAP_LIGHTNING = 0
+        self.bot = Bot(HELLO)
         a = self.act(make_obs(t=3, weapons=[gun(), lightning()], pickups=[pickup(1, "laser", (2, 0, 0))]))
         self.assertNotIn("take", a)
 
@@ -223,16 +232,20 @@ class TestWeaponGrab(Base):
         self.assertGreater(a["move"][1], 0.9)
 
     def test_grab_gives_up_after_a_long_chase(self):
+        botmod.lootlib.GRAB_GIVE_UP_S, saved = 15.0, botmod.lootlib.GRAB_GIVE_UP_S  # the timings below
+        self.addCleanup(setattr, botmod.lootlib, "GRAB_GIVE_UP_S", saved)
         pk = [pickup(1, "laser", (60, 0, 0))]
         self.act(make_obs(t=3, pickups=pk, zone=self.ZONE))
         a = self.act(make_obs(t=20, tick=2, pickups=pk, zone=self.ZONE))
         self.assertLess(a["move"][0], 0)
 
     def test_chase_clock_survives_the_pickup_leaving_view(self):
+        botmod.lootlib.GRAB_GIVE_UP_S, saved = 15.0, botmod.lootlib.GRAB_GIVE_UP_S  # the timings below
+        self.addCleanup(setattr, botmod.lootlib, "GRAB_GIVE_UP_S", saved)
         pk = [pickup(1, "laser", (60, 0, 0))]
         self.act(make_obs(t=3, pickups=pk, zone=self.ZONE))
-        a = self.act(make_obs(t=9, tick=2, pickups=[], zone=self.ZONE))  # out of view for a while
-        self.assertLess(a["move"][0], 0)
+        a = self.act(make_obs(t=9, tick=2, pickups=[], zone=self.ZONE))  # out of view: remembered (loot_mem)
+        self.assertGreater(a["move"][0], 0.9)
         a = self.act(make_obs(t=12, tick=3, pickups=pk, zone=self.ZONE))  # back, 9 s in: still chased
         self.assertGreater(a["move"][0], 0.9)
         self.act(make_obs(t=17, tick=4, pickups=[], zone=self.ZONE))
@@ -242,6 +255,8 @@ class TestWeaponGrab(Base):
         self.assertLess(a["move"][0], 0)
 
     def test_chase_clock_is_per_pickup(self):
+        botmod.lootlib.GRAB_GIVE_UP_S, saved = 15.0, botmod.lootlib.GRAB_GIVE_UP_S
+        self.addCleanup(setattr, botmod.lootlib, "GRAB_GIVE_UP_S", saved)
         self.act(make_obs(t=3, pickups=[pickup(1, "laser", (60, 0, 0))], zone=self.ZONE))
         a = self.act(make_obs(t=30, tick=2, pickups=[pickup(2, "laser", (60, 0, 0))], zone=self.ZONE))
         self.assertGreater(a["move"][0], 0.9)
@@ -582,6 +597,7 @@ class TestThreatBearing(Base):
         snd = [{"kind": "gun", "bearing": 2.0, "dist": "near", "age": 0.1}]
         a = self.act(make_obs(t=30, weapons=[gun(), None], pickups=[pickup(1, "laser", (0, 60, 0))], sounds=snd))
         self.assertGreater(a["move"][1], 0.9)
+        self.bot.loot.seen.clear()  # the laser is gone (taken): only the cube is left
         a = self.act(self.obs(t=31, tick=2, cubes=[{"id": 5001, "pos": [20, 0, 0]}], sounds=snd))
         self.assertGreater(a["move"][0], 0.3)  # quiet walk: 4.5 / 11.7 of full speed
 
