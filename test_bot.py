@@ -1714,7 +1714,7 @@ class TestMainEntrypoint(unittest.TestCase):
         self.assertIn('ENTRYPOINT ["python3", "-u", "/bot/bot.py"]', text)
         copy_lines = [l for l in text.splitlines() if l.startswith("COPY ")]
         self.assertEqual(len(copy_lines), 1)
-        for name in ("mechfight.py", "bot.py", "aim.py", "ray.py"):
+        for name in ("mechfight.py", "bot.py", "aim.py", "ray.py", "fight.py", "chase.py"):
             self.assertIn(name, copy_lines[0].split())
         with open(os.path.join(HERE, "bot.py")) as f:
             self.assertIn('if __name__ == "__main__":', f.read())

@@ -14,6 +14,10 @@ try:
     import fight as fightlib
 except Exception:  # fight tactics missing: v3 flee
     fightlib = None
+try:
+    import chase as chaselib
+except Exception:  # chase module missing or broken: no chasing
+    chaselib = None
 
 TAU = 2 * math.pi
 # upgrade preference order: the first id present in an offer is picked
@@ -123,6 +127,8 @@ class Bot:
         self.dodge_t = -99.0
         self.fight = fightlib.Fight() if fightlib is not None else None
         self.fight_errors = 0
+        self.chaser = chaselib.Chase() if chaselib is not None else None
+        self.chase_errors = 0
 
     def pick_upgrade(self, offer):
         ids = [ch["id"] for ch in offer["choices"]]
@@ -423,6 +429,7 @@ class Bot:
         snap = {k: getattr(self, k) for k in STATE}
         sets = (set(self.skip), dict(self.fails), dict(self.chase), dict(self.hit_by), dict(self.hit_on))
         fsnap = dict(vars(self.fight), threats=dict(self.fight.threats)) if self.fight is not None else None
+        csnap = self.chaser.state() if self.chaser is not None else None
         try:
             return self._decide(obs)
         except Exception:
@@ -434,6 +441,8 @@ class Bot:
         self.skip, self.fails, self.chase, self.hit_by, self.hit_on = sets
         if fsnap is not None:
             vars(self.fight).update(fsnap)
+        if csnap is not None:
+            self.chaser.restore(csnap)
         self.lite = True
         try:
             return self._decide(obs)
@@ -457,6 +466,24 @@ class Bot:
         except Exception:
             self.fight_errors += 1  # broken once: v3 flee for the rest of the match
             mf.log(f"fight.plan failed, v3 flee from now on: {traceback.format_exc()}")
+            return None
+
+    def _chase_on(self):
+        """chase.py runs this pass: module loaded, ray test present, not degraded, never failed."""
+        return self.chaser is not None and not self.lite and raylib is not None and self.chase_errors == 0
+
+    def _chase_plan(self, t, me, mechs, zone, active):
+        """chase.py's plan for a wounded hunter backing off, or None (not active, no chase, off or failed)."""
+        if not self._chase_on():
+            return None
+        try:
+            if not active:
+                self.chaser.observe(t, mechs)
+                return None
+            return self.chaser.plan(t, me, mechs, self.hit_on, self.hit_by, zone, raylib.clear)
+        except Exception:
+            self.chase_errors += 1  # broken once: no chasing for the rest of the match
+            mf.log(f"chase.plan failed, chasing off from now on: {traceback.format_exc()}")
             return None
 
     def _fallback(self, obs):
@@ -489,6 +516,8 @@ class Bot:
                     self.threat_yaw, self.threat_t = ev["bearing"], t
             elif kind == "hit" and ev.get("target") is not None:
                 self.hit_on[ev["target"]] = t
+            elif kind == "kill" and self.chaser is not None:
+                self.chaser.forget(ev.get("target"))
             elif kind == "take_failed":
                 pid = ev.get("id")
                 self.fails[pid] = self.fails.get(pid, 0) + 1
@@ -554,6 +583,13 @@ class Bot:
         if fp is not None and (hiding or in_zone):  # hide or chase: beats loot and zone positioning
             grab = drop = goal = None
             mx, my = fp["move"]
+        # ---- chase a wounded hunter backing off to regen (chase.py): beats loot and zone positioning ----
+        capturing = drop is not None and dgoal < drop.get("radius", 8) - 2
+        cp = self._chase_plan(t, me, mechs, zone, in_zone and not urgent and not capturing and not hiding)
+        if cp is not None:
+            grab = drop = goal = None
+            mx, my = cp["move"]
+
         flee = hp_frac < 0.45 and not self._fight_on()
         if hp_frac < 0.45 and not flee and in_zone and not (fp and fp["reason"] == "chase"):
             near = [unit(m["pos"][0] - x, m["pos"][1] - y) for m in mechs[:3] if math.dist(m["pos"][:2], (x, y)) < 120]
@@ -703,13 +739,13 @@ class Bot:
         # walk under 5 m/s when there is no hurry: no step sounds
         time_left = max(zone["shrink_end"] - t, 0.0)
         walk_t = (dz - safe_r) / 4.5
-        hurry = urgent or flee or bool(mechs) or self.detour or goal is not None or dodging or walk_t > time_left * 0.7
+        hurry = urgent or flee or bool(mechs) or cp is not None or self.detour or goal is not None or dodging or walk_t > time_left * 0.7
         if not hurry and n > 0:
             k = min(1.0, 4.5 / max(me["stats"].get("walk_speed", 11.7), 0.1))
             mx, my = mx * k, my * k
         energy_ok = me["energy"] > 25 and me["grounded"] and n > 0
         boost = bool(urgent and energy_ok) or bool(goal is not None and in_zone and dgoal > 12 and energy_ok) \
-            or bool(dodge_boost and energy_ok)
+            or bool(dodge_boost and energy_ok) or bool(cp is not None and cp["boost"] and energy_ok and self.stuck < 2)
         act.update(move=[mx, my], boost=boost or jet, jump=jump)
 
         # ---- aim and fire: the aim module decides, v3's engagement rules gate it; v3 logic if it fails ----
@@ -738,6 +774,10 @@ class Bot:
             if hiding:  # hold fire; a charging laser keeps its trigger (releasing would fire it)
                 fire = [bool(ws[i]) and ws[i].get("kind") == "laser" and (ws[i].get("charge") or 0) > 0
                         for i in (0, 1)]
+        if cp is not None and not cp["tracked"] and target is None and not (las is not None and fire[las_i]):
+            ax, ay, az = cp["aim_at"]  # track dropped: look where it was going
+            aim_cmd = [math.atan2(ay - y, ax - x),
+                       math.atan2(az - z - me["stats"].get("muzzle_height", 7), max(math.hypot(ax - x, ay - y), 1.0))]
         if aim_cmd is None:
             aim_cmd = self._idle_aim(me, t, hit_recent, empty, grab, mx, my, n)
         act["aim"] = [float(aim_cmd[0]), float(aim_cmd[1])]
@@ -749,7 +789,7 @@ class Bot:
             act["reload"] = True
         act["fire"] = fire
 
-        mf.draw.label(f"hp {me['hp']:.0f} z{dz:.0f}/{safe_r:.0f}{' FLEE' if flee else ''}{' HIDE' if hiding else ''}{' GRAB' if grab else ''}")
+        mf.draw.label(f"hp {me['hp']:.0f} z{dz:.0f}/{safe_r:.0f}{' FLEE' if flee else ''}{' HIDE' if hiding else ''}{' GRAB' if grab else ''}{' CHASE' if cp else ''}")
         return act
 
 
