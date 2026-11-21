@@ -112,9 +112,31 @@ class TestSynthetic(unittest.TestCase):
         self.assertAlmostEqual(r.ground(20, 20), 10.0, places=6)
         self.assertAlmostEqual(r.ground(-5, 20), 0.0, places=6)  # clamped outside the grid
 
+    def test_terrain_blocks_with_a_2m_grid_step(self):
+        nx = ny = 81
+        arr = array("h", [0] * (nx * ny))
+        for j in range(ny):
+            for i in range(60, 63):
+                arr[j * nx + i] = 1000  # a 10 m ridge at x = 120..124 m
+        meta = {"minX": 0.0, "minY": 0.0, "step": 2.0, "nx": nx, "ny": ny, "scale": 0.01}
+        r = Ray_from({"prisms": []}, (arr, meta))
+        self.assertAlmostEqual(r.ground(122.0, 40.0), 10.0, places=6)
+        self.assertFalse(r.clear((100.0, 40.0, 4.0), (150.0, 40.0, 4.0)))
+        self.assertTrue(r.clear((100.0, 40.0, 11.0), (150.0, 40.0, 11.0)))
+
 
 @need_map
 class TestRealMap(unittest.TestCase):
+    def test_off_map_ray_under_one_ms(self):
+        a, b = (554.4, 251.5, 32.0), (1232.7, 360.3, 14.1)
+        REAL.clear(a, b)
+        t0 = time.perf_counter()
+        for _ in range(50):
+            REAL.clear(a, b)
+        ms = (time.perf_counter() - t0) / 50 * 1000.0
+        print("off-map ray: %.3f ms" % ms)
+        self.assertLess(ms, 1.0)
+
     def test_through_a_real_building_blocked_over_it_clear(self):
         p = next(q for q in REAL.prisms if q["kind"] == "building" and q["top"] - q["base"] > 12 and not q["holes"])
         c = inside_point(REAL, p)

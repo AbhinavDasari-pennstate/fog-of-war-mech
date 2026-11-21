@@ -255,27 +255,25 @@ class Ray:
         ax, ay, az = a[0], a[1], a[2]
         dx, dy, dz = b[0] - ax, b[1] - ay, b[2] - az
         L = math.hypot(dx, dy)
-        chunk = float(_BLK)
-        n = max(1, int(math.ceil(L / chunk)))
+        bw = self.t_step * _BLK  # block width in metres
+        n = max(1, int(math.ceil(L / bw)))
+        nbx1, nby1 = self.nbx - 1, self.nby - 1
         for c in range(n):
             ta, tb = c / n, (c + 1) / n
             xa, ya, za = ax + dx * ta, ay + dy * ta, az + dz * ta
             xb, yb, zb = ax + dx * tb, ay + dy * tb, az + dz * tb
             zmin = za if za < zb else zb
-            bx0 = int((min(xa, xb) - self.t_minx) // _BLK)
-            bx1 = int((max(xa, xb) - self.t_minx) // _BLK)
-            by0 = int((min(ya, yb) - self.t_miny) // _BLK)
-            by1 = int((max(ya, yb) - self.t_miny) // _BLK)
-            bx0, bx1 = max(bx0, 0), min(bx1, self.nbx - 1)
-            by0, by1 = max(by0, 0), min(by1, self.nby - 1)
+            # off the map, ground() clamps to the edge cells, so clamp to the edge blocks too
+            bx0 = min(max(int((min(xa, xb) - self.t_minx) // bw), 0), nbx1)
+            bx1 = min(max(int((max(xa, xb) - self.t_minx) // bw), 0), nbx1)
+            by0 = min(max(int((min(ya, yb) - self.t_miny) // bw), 0), nby1)
+            by1 = min(max(int((max(ya, yb) - self.t_miny) // bw), 0), nby1)
             peak = -1e9
             for by in range(by0, by1 + 1):
                 for bx in range(bx0, bx1 + 1):
                     v = self.bm[by][bx]
                     if v > peak:
                         peak = v
-            if bx0 > bx1 or by0 > by1:
-                peak = 1e9  # off the map: fall through to the clamped fine test
             if zmin > peak + 1e-6:
                 continue
             if self._below_exact(xa, ya, za, xb, yb, zb):
