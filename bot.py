@@ -490,14 +490,13 @@ class Bot:
         return self.chaser is not None and not self.lite and raylib is not None and self.chase_errors == 0
 
     def _chase_plan(self, t, me, mechs, zone, active):
-        """chase.py's plan for a wounded hunter backing off, or None (not active, no chase, off or failed)."""
+        """chase.py's plan for a wounded hunter, or None (not active, no chase, off or failed)."""
         if not self._chase_on():
             return None
         try:
             if not active:
-                self.chaser.observe(t, mechs)
                 return None
-            return self.chaser.plan(t, me, mechs, self.hit_on, self.hit_by, zone, raylib.clear)
+            return self.chaser.plan(t, me, mechs, self.hit_on, zone, raylib.clear)
         except Exception:
             self.chase_errors += 1  # broken once: no chasing for the rest of the match
             mf.log(f"chase.plan failed, chasing off from now on: {traceback.format_exc()}")
@@ -621,9 +620,9 @@ class Bot:
         if fp is not None and (hiding or in_zone):  # hide or chase: beats loot and zone positioning
             grab = drop = goal = None
             mx, my = fp["move"]
-        # ---- chase a wounded hunter backing off to regen (chase.py): beats loot and zone positioning ----
+        # ---- chase a wounded hunter so it cannot regen (chase.py): beats loot and zone positioning ----
         capturing = drop is not None and dgoal < drop.get("radius", 8) - 2
-        cp = self._chase_plan(t, me, mechs, zone, in_zone and not urgent and not capturing and not hiding)
+        cp = self._chase_plan(t, me, mechs, zone, in_zone and not urgent and not capturing and not hiding and not rest)
         if cp is not None:
             grab = drop = goal = None
             mx, my = cp["move"]
@@ -783,7 +782,8 @@ class Bot:
             mx, my = mx * k, my * k
         energy_ok = me["energy"] > 25 and me["grounded"] and n > 0
         boost = bool(urgent and energy_ok) or bool(goal is not None and loot is None and in_zone and dgoal > 12 and energy_ok) \
-            or bool(dodge_boost and energy_ok) or bool(cp is not None and cp["boost"] and energy_ok and self.stuck < 2)
+            or bool(dodge_boost and energy_ok) or bool(cp is not None and cp["boost"] and energy_ok and self.stuck < 2
+                 and mx * cp["move"][0] + my * cp["move"][1] > 0.9 * n)  # only while still heading at it
         act.update(move=[mx, my], boost=boost or jet, jump=jump)
 
         # ---- aim and fire: the aim module decides, v3's engagement rules gate it; v3 logic if it fails ----
