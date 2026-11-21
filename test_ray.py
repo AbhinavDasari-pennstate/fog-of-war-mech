@@ -198,6 +198,32 @@ class TestRealMap(unittest.TestCase):
                 break
         self.assertGreaterEqual(done, 1)
 
+    def test_sharp_ridge_dip_is_blocked(self):
+        # this segment dips about 1 m under the ground near (-362.0, 107.55); a 1 m sampling step missed it
+        a, b = (-247.35, 139.86, -8.53), (-367.55, 105.99, 49.59)
+        self.assertFalse(REAL.clear(a, b))
+        self.assertTrue(REAL.clear(a, b, terrain=False))
+
+    def test_terrain_matches_dense_sampling(self):
+        """Exact terrain test vs sampling every 0.02 m: no segment that dips > 5 cm below ground is called clear."""
+        random.seed(13)
+        missed = false_block = 0
+        for _ in range(300):
+            x, y = random.uniform(-500, 540), random.uniform(-320, 380)
+            ang, L = random.uniform(0, 6.283), random.uniform(5, 150)
+            a = (x, y, REAL.ground(x, y) + random.uniform(-1, 8))
+            bx, by = x + L * math.cos(ang), y + L * math.sin(ang)
+            b = (bx, by, REAL.ground(bx, by) + random.uniform(-1, 8))
+            n = int(L * 50) + 2
+            dip = min(a[2] + (b[2] - a[2]) * k / n - REAL.ground(a[0] + (bx - a[0]) * k / n, a[1] + (by - a[1]) * k / n)
+                      for k in range(n + 1))
+            got = REAL._terrain_blocked(a, b)
+            if dip < -0.05 and not got:
+                missed += 1
+            if dip > 0.05 and got:
+                false_block += 1
+        self.assertEqual((missed, false_block), (0, 0))
+
     def test_matches_dense_sampling(self):
         """Cross-check against brute force: sample each segment every 0.1 m against nearby prisms."""
         random.seed(11)

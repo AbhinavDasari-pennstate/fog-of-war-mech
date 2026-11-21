@@ -9,8 +9,8 @@ shots (protocol section 7), cars, barriers and water are scenery the server igno
 The prism test is exact: the segment is clipped to the prism's height slab, split at every
 crossing of a ring or hole edge, and the midpoint of each piece is tested for being inside the
 ring and outside the holes. A uniform grid keeps only the prisms near the segment. The terrain
-test samples the segment every `TERRAIN_STEP` m against the bilinear height field, skipping
-stretches that are higher than the tallest ground in their 8 m blocks.
+test is exact against the bilinear height field: per terrain cell the clearance is quadratic
+along the segment. Stretches higher than the tallest ground in their 8 m blocks are skipped.
 
 Load once: `init(map_dir)` (or the first `clear` call finds the map itself), or build a `Ray`.
 """
@@ -20,7 +20,6 @@ import os
 import sys
 from array import array
 
-TERRAIN_STEP = 1.0
 _CELL = 24.0
 _BLK = 8
 
@@ -279,12 +278,52 @@ class Ray:
                 peak = 1e9  # off the map: fall through to the clamped fine test
             if zmin > peak + 1e-6:
                 continue
-            m = max(1, int(math.ceil(L / n / TERRAIN_STEP)))
-            for s in range(m + 1):
-                f = s / m
-                x, y, z = xa + (xb - xa) * f, ya + (yb - ya) * f, za + (zb - za) * f
-                if z < self.ground(x, y) - 1e-6:
+            if self._below_exact(xa, ya, za, xb, yb, zb):
+                return True
+        return False
+
+    def _below_exact(self, xa, ya, za, xb, yb, zb):
+        """Exact: does the segment go under the bilinear ground? Inside one terrain cell the
+        clearance z - ground is quadratic in the segment parameter, so 3 samples fix it."""
+        st, mx, my = self.t_step, self.t_minx, self.t_miny
+        gxa, gya = (xa - mx) / st, (ya - my) / st
+        gxb, gyb = (xb - mx) / st, (yb - my) / st
+        ts = [0.0, 1.0]
+        for g0, g1 in ((gxa, gxb), (gya, gyb)):
+            if abs(g1 - g0) > 1e-12:
+                lo, hi = (g0, g1) if g0 < g1 else (g1, g0)
+                for k in range(int(math.floor(lo)) + 1, int(math.ceil(hi))):
+                    ts.append((k - g0) / (g1 - g0))
+        ts.sort()
+        dx, dy, dz = xb - xa, yb - ya, zb - za
+        gr = self.ground
+
+        def c(t):
+            return za + dz * t - gr(xa + dx * t, ya + dy * t)
+
+        prev = c(0.0)
+        if prev < -1e-6:
+            return True
+        for i in range(len(ts) - 1):
+            t0, t1 = ts[i], ts[i + 1]
+            if t1 - t0 <= 1e-12:
+                continue
+            c1 = c(t1)
+            if c1 < -1e-6:
+                return True
+            tm = 0.5 * (t0 + t1)
+            cm = c(tm)
+            if cm < -1e-6:
+                return True
+            # quadratic through (t0, prev), (tm, cm), (t1, c1): vertex inside -> check it
+            h = 0.5 * (t1 - t0)
+            a2 = (prev - 2.0 * cm + c1) / (2.0 * h * h)
+            if a2 > 1e-12:
+                b1 = (c1 - prev) / (2.0 * h)
+                tv = tm - b1 / (2.0 * a2)
+                if t0 < tv < t1 and cm - b1 * b1 / (4.0 * a2) < -1e-6:
                     return True
+            prev = c1
         return False
 
     # ------------------------------------------------------------------ public
