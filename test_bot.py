@@ -726,6 +726,25 @@ class TestEdgeCases(Base):
             self.assertEqual(problems(obs, a), [])
         self.assertTrue(a["jump"] or bot.detour > 0)
 
+    def test_a_failed_stuck_jump_still_leads_to_a_detour(self):
+        """Pressed into a wall: the jump at stuck 3 lifts us off the ground; landing still slow must start the
+        detour, not restart the count (sim seed 1648103790: 20 s jumping at one wall, laser never reached)."""
+        bot = Bot(HELLO)
+        pk = [pickup(1, "laser", (60, 0, 0))]
+        tick = 0
+        for _ in range(3):
+            for grounded in (True, True, True, False, False, False):
+                tick += 1
+                obs = make_obs(tick=tick, t=3 + tick / 10, pickups=pk, vel=(0, 0, 0), grounded=grounded)
+                a = bot.act(obs)
+                self.assertEqual(problems(obs, a), [])
+                if bot.detour > 0:
+                    break
+            if bot.detour > 0:
+                break
+        self.assertGreater(bot.detour, 0)
+        self.assertLessEqual(tick, 7)  # 3 slow steps, the jump, landing: detour
+
     def test_missing_optional_keys_do_not_crash(self):
         obs = make_obs(mechs=[{"id": 5, "kind": "mech", "pos": [50, 0, 0]}])
         for k in ("projectiles", "crates", "beams", "drops"):

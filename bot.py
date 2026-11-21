@@ -780,7 +780,8 @@ class Bot:
         # ---- stuck on a wall: sidestep, jump and jet ----
         want = math.hypot(mx, my) > 0.2
         speed = math.hypot(me["vel"][0], me["vel"][1])
-        self.stuck = self.stuck + 1 if want and speed < 2.0 and me["grounded"] else 0
+        if me["grounded"]:  # airborne (our own stuck jump) keeps the count, so a failed jump leads to the detour
+            self.stuck = self.stuck + 1 if want and speed < 2.0 else 0
         if self.stuck >= 4 and self.detour == 0:
             if t - self.detour_end < 4.0:  # the last detour did not get us round: try the other side
                 self.detour_sign = -self.detour_sign
