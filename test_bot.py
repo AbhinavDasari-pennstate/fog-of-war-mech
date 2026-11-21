@@ -372,6 +372,7 @@ class TestLaser(FallbackBase):
         self.assertTrue(a["fire"][1])
 
     def test_laser_charging_while_fleeing_is_released(self):
+        self.bot.fight = None  # v3 flee: only without fight.py (fight.py keeps fighting at low HP)
         e = self.enemy((100, 0, 0))
         a = self.act(make_obs(hp=400, weapons=[gun(), laser(charge=0.3)], mechs=[e]))
         self.assertFalse(a["fire"][1])
@@ -690,6 +691,7 @@ class TestFleeAndDodge(Base):
     ZONE = {"center": [300, 0], "radius": 560, "next_center": [420, 0], "next_radius": 140}
 
     def test_low_hp_never_closes_on_the_attacker_while_in_zone(self):
+        self.bot.fight = None  # v3 flee: only without fight.py (fight.py keeps fighting at low HP)
         e = mech(5, (70, 0, 0))
         e["aim"] = [math.pi, 0]
         ev = [{"type": "damaged", "amount": 45, "weapon": "gun", "bearing": 0.0, "by": 5}]
@@ -700,6 +702,7 @@ class TestFleeAndDodge(Base):
         self.assertGreater(a["move"][0], 0.0)
 
     def test_low_hp_keeps_the_sideways_part_of_the_zone_pull(self):
+        self.bot.fight = None  # v3 flee: only without fight.py (fight.py keeps fighting at low HP)
         e = mech(5, (0, 70, 0))
         zone = {"center": [300, 100], "radius": 560, "next_center": [420, 100], "next_radius": 140}
         a = self.act(make_obs(hp=420, zone=zone, mechs=[e]))
@@ -940,6 +943,7 @@ class TestSideStep(Base):
         self.assertEqual(signs[10], signs[0])
 
     def test_no_sidestep_while_fleeing(self):
+        self.bot.fight = None  # v3 flee: only without fight.py (fight.py keeps fighting at low HP)
         a = self.act(make_obs(hp=400, mechs=[self.shooter((100, 0, 0))], vel=(0, 5, 0)))
         self.assertAlmostEqual(a["move"][1], 0.0)
         self.assertLess(a["move"][0], 0.0)
@@ -1003,6 +1007,7 @@ class TestLaserGrace(FallbackBase):
         self.assertFalse(a["fire"][1])  # more than 0.5 s since it was in view
 
     def test_no_grace_without_a_charge_or_when_fleeing(self):
+        self.bot.fight = None  # v3 flee: only without fight.py (fight.py keeps fighting at low HP)
         self.act(make_obs(t=30, aim=self.want, weapons=[gun(), laser(charge=0.3)], mechs=[self.e]))
         a = self.act(make_obs(tick=2, t=30.1, weapons=[gun(), laser(charge=0.0)], mechs=[]))
         self.assertFalse(a["fire"][1])
@@ -1352,6 +1357,7 @@ class TestAimWiring(Base):
         self.assertTrue(self.act(hit)["fire"][0])
 
     def test_fleeing_lets_a_charging_laser_go(self):
+        self.bot.fight = None  # v3 flee: only without fight.py (fight.py keeps fighting at low HP)
         e = mech(5, (100, 0, 0))
         a = self.act(make_obs(hp=400, weapons=[gun(), laser(charge=0.3)], mechs=[e]))
         self.assertFalse(a["fire"][1])
@@ -1400,6 +1406,7 @@ class TestAimWiring(Base):
         self.assertTrue(self.act(obs)["fire"][1])
 
     def test_grace_hold_is_off_when_fleeing(self):
+        self.bot.fight = None  # v3 flee: only without fight.py (fight.py keeps fighting at low HP)
         e = mech(5, (150, 20, 0))
         self.act(make_obs(t=30, weapons=[gun(), laser(charge=0.3)], mechs=[e]))
         a = self.act(make_obs(tick=2, t=30.1, hp=400, weapons=[gun(), laser(charge=0.4)], mechs=[]))
@@ -1627,6 +1634,7 @@ class TestMapEdgeAndConfig(Base):
 
     def test_flee_runs_along_the_edge_at_full_speed(self):
         bot = self.bot_with_bounds()
+        bot.fight = None  # v3 flee: only without fight.py (fight.py keeps fighting at low HP)
         a = bot.act(self.flee_obs())
         self.assertAlmostEqual(abs(a["move"][0]), 1.0)
         self.assertAlmostEqual(a["move"][1], 0.0)
@@ -1645,6 +1653,7 @@ class TestMapEdgeAndConfig(Base):
 
     def test_no_slide_away_from_the_edge(self):
         bot = self.bot_with_bounds()
+        bot.fight = None  # v3 flee: only without fight.py (fight.py keeps fighting at low HP)
         obs = self.flee_obs()
         obs["self"]["pos"] = [-150, 0, 0]
         obs["mechs"] = [mech(5, (-150, 40, 0))]

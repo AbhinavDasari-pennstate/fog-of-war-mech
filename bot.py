@@ -10,6 +10,10 @@ try:
     import ray as raylib
 except Exception:  # helper modules missing or broken: v3 aim, fire and line-of-fire logic only
     aimlib = raylib = None
+try:
+    import fight as fightlib
+except Exception:  # fight tactics missing: v3 flee
+    fightlib = None
 
 TAU = 2 * math.pi
 # upgrade preference order: the first id present in an offer is picked
@@ -117,6 +121,8 @@ class Bot:
         self.errors = 0
         self.edge_until = -99.0
         self.dodge_t = -99.0
+        self.fight = fightlib.Fight() if fightlib is not None else None
+        self.fight_errors = 0
 
     def pick_upgrade(self, offer):
         ids = [ch["id"] for ch in offer["choices"]]
@@ -218,7 +224,7 @@ class Bot:
             return False  # lite pass: no ray test, so no shots at mechs we only remember
         return math.dist(m["pos"][:3], me["pos"][:3]) <= rng and self.los_clear(me, m)
 
-    def _aim_plan(self, obs, hitters, seen_mechs=None, mechs=None):
+    def _aim_plan(self, obs, hitters, seen_mechs=None, mechs=None, hide=False):
         """aim.decide for this observation, or None when it is unavailable or failed (v3 logic then runs).
 
         The aim module scores targets (wounded, near, threatening) without knowing what v3 may shoot, so it
@@ -234,7 +240,7 @@ class Bot:
             use = dict(obs, mechs=[m for m in obs["mechs"] if (
                 id(m) in keep if m.get("kind") == "mech" else (not hitters or id(m) in drones))])
             npcs_ok = bool(hitters)
-            a, f, tg = aimlib.decide(use, los=raylib.clear, hide=False, deadline=None, include_npcs=npcs_ok)
+            a, f, tg = aimlib.decide(use, los=raylib.clear, hide=hide, deadline=None, include_npcs=npcs_ok)
             plan = aimlib.last_plan
             if "error" in plan:
                 raise RuntimeError(plan["error"])
@@ -416,6 +422,7 @@ class Bot:
         self.lite = False
         snap = {k: getattr(self, k) for k in STATE}
         sets = (set(self.skip), dict(self.fails), dict(self.chase), dict(self.hit_by), dict(self.hit_on))
+        fsnap = dict(vars(self.fight), threats=dict(self.fight.threats)) if self.fight is not None else None
         try:
             return self._decide(obs)
         except Exception:
@@ -425,6 +432,8 @@ class Bot:
         for k, v in snap.items():  # the failed pass must not leave its counters behind
             setattr(self, k, v)
         self.skip, self.fails, self.chase, self.hit_by, self.hit_on = sets
+        if fsnap is not None:
+            vars(self.fight).update(fsnap)
         self.lite = True
         try:
             return self._decide(obs)
@@ -434,6 +443,21 @@ class Bot:
         finally:
             self.lite = False
         return self._fallback(obs)
+
+    def _fight_on(self):
+        """fight.py runs this pass (else v3 flee): module loaded, ray test present, not degraded, never failed."""
+        return self.fight is not None and not self.lite and raylib is not None and self.fight_errors == 0
+
+    def _fight_plan(self, t, me, mechs, ccx, ccy, cr, urgent):
+        """fight.py's hide decision, or None (v3 behaviour) when it is unavailable, degraded or failed."""
+        if not self._fight_on():
+            return None
+        try:
+            return self.fight.plan(t, me, mechs, raylib.clear, (ccx, ccy, cr - 20), urgent, t - self.dmg_t < 1.0)
+        except Exception:
+            self.fight_errors += 1  # broken once: v3 flee for the rest of the match
+            mf.log(f"fight.plan failed, v3 flee from now on: {traceback.format_exc()}")
+            return None
 
     def _fallback(self, obs):
         """Last resort: walk toward the next zone centre, no shooting."""
@@ -524,8 +548,22 @@ class Bot:
             else:
                 mx, my = unit(goal[0] - x, goal[1] - y)
 
-        # ---- danger: flee visible mechs when hurt (never toward them while in the zone), keep off drones ----
-        flee = hp_frac < 0.45
+        # ---- danger: hide behind cover to regen (fight.py), else v3: flee visible mechs when hurt; keep off drones ----
+        fp = self._fight_plan(t, me, mechs, ccx, ccy, cr, urgent)
+        hiding = fp is not None and fp["hide"]
+        if fp is not None and (hiding or in_zone):  # hide or chase: beats loot and zone positioning
+            grab = drop = goal = None
+            mx, my = fp["move"]
+        flee = hp_frac < 0.45 and not self._fight_on()
+        if hp_frac < 0.45 and not flee and in_zone and not (fp and fp["reason"] == "chase"):
+            near = [unit(m["pos"][0] - x, m["pos"][1] - y) for m in mechs[:3] if math.dist(m["pos"][:2], (x, y)) < 120]
+            for _ in range(4):  # hurt and fighting: still never walk at a near mech (no flee push); repeat for 2+
+                for tx_, ty_ in near:
+                    comp = mx * tx_ + my * ty_
+                    if comp > 0:
+                        mx, my = mx - comp * tx_, my - comp * ty_
+            if any(mx * tx_ + my * ty_ > 1e-6 for tx_, ty_ in near):
+                mx = my = 0.0
         if flee:
             fx = fy = 0.0
             for m in mechs[:3]:
@@ -584,7 +622,7 @@ class Bot:
                 break
 
         # ---- free cubes nearby when calm ----
-        calm = not mechs and t - self.dmg_t > 3
+        calm = not mechs and t - self.dmg_t > 3 and not hiding
         if calm and not urgent and mx == 0 and my == 0:
             items = [c["pos"] for c in obs["cubes"]]
             items = [p for p in items if math.dist(p[:2], (x, y)) < 40 and math.hypot(p[0] - cx, p[1] - cy) < safe_r + 20]
@@ -684,10 +722,10 @@ class Bot:
         aim_cmd = None
         reload_cmd = False
         seen_mechs = [m for m in mechs if self._seen(me, m, t)]
-        plan = self._aim_plan(obs, hitters, seen_mechs, mechs)
+        plan = self._aim_plan(obs, hitters, seen_mechs, mechs, hide=hiding)
         if plan is not None:
             target = plan["target"]
-            fire = self._gate_fire(plan["fire"], target, me, ws, seen_mechs, flee, t)
+            fire = self._gate_fire(plan["fire"], target, me, ws, seen_mechs, flee, t)  # hide=hiding already holds fire
             aim_cmd = plan["aim"]
             reload_cmd = plan["reload"]
             if las is not None:
@@ -697,6 +735,9 @@ class Bot:
                     aim_cmd = list(self.lt_aim)
         else:
             aim_cmd, fire = self._v3_fire(me, t, target, mechs, flee, slot, gun, las, light, gun_i, las_i, light_i)
+            if hiding:  # hold fire; a charging laser keeps its trigger (releasing would fire it)
+                fire = [bool(ws[i]) and ws[i].get("kind") == "laser" and (ws[i].get("charge") or 0) > 0
+                        for i in (0, 1)]
         if aim_cmd is None:
             aim_cmd = self._idle_aim(me, t, hit_recent, empty, grab, mx, my, n)
         act["aim"] = [float(aim_cmd[0]), float(aim_cmd[1])]
@@ -708,7 +749,7 @@ class Bot:
             act["reload"] = True
         act["fire"] = fire
 
-        mf.draw.label(f"hp {me['hp']:.0f} z{dz:.0f}/{safe_r:.0f}{' FLEE' if flee else ''}{' GRAB' if grab else ''}")
+        mf.draw.label(f"hp {me['hp']:.0f} z{dz:.0f}/{safe_r:.0f}{' FLEE' if flee else ''}{' HIDE' if hiding else ''}{' GRAB' if grab else ''}")
         return act
 
 
