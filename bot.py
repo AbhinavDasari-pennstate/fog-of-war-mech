@@ -495,7 +495,6 @@ class Bot:
             return None
         try:
             if not active:
-                self.chaser.observe(t, mechs)
                 return None
             return self.chaser.plan(t, me, mechs, self.hit_on, self.hit_by, zone, raylib.clear)
         except Exception:

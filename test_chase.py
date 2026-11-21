@@ -31,27 +31,38 @@ def plan(c, t, mechs, hit_on=None, my=None, zone=None, clear=clear_all):
 
 
 class ChaseUnit(unittest.TestCase):
+
+    def test_only_wounded_and_near_starts(self):
+        self.assertIsNone(plan(Chase(), 30.0, [hunter(5, (150, 0, 0), hp=1300)]))
+        far = chase.CHASE_START_RANGE + 10
+        self.assertIsNone(plan(Chase(), 30.0, [hunter(5, (far, 0, 0))]))
+        self.assertIsNotNone(plan(Chase(), 30.0, [hunter(5, (150, 0, 0))]))  # no hit needed
+
+    def test_needs_laser_but_no_own_hp_floor(self):
+        self.assertIsNone(plan(Chase(), 30.0, [hunter(5, (150, 0, 0))], {5: 29.0}, me(weapons=[gun(), None])))
+        self.assertIsNotNone(plan(Chase(), 30.0, [hunter(5, (150, 0, 0))], {5: 29.0}, me(hp=300)))
+
+    def test_advancing_hunter_and_other_mechs_do_not_stop_it(self):
+        coming = hunter(5, (150, 0, 0))
+        coming["vel"] = [-10, 0, 0]
+        c = Chase()
+        self.assertIsNotNone(plan(c, 30.0, [coming], {5: 29.0}))
+        p = c.plan(30.5, me(), [coming, hunter(6, (0, 150, 0), hp=1400)], {5: 29.0}, {6: 30.4, None: 30.4},
+                   ZONE, clear_all)
+        self.assertEqual(p["id"], 5)
+
+    def test_prey_outside_current_zone_circle_aborts(self):
+        self.assertIsNone(plan(Chase(), 30.0, [hunter(5, (565, 0, 0))], {5: 29.0}, me(pos=(440, 0, 0))))
+        self.assertIsNotNone(plan(Chase(), 30.0, [hunter(5, (555, 0, 0))], {5: 29.0}, me(pos=(440, 0, 0))))
+        z = dict(ZONE, next_radius=100, shrink_start=30, shrink_end=32)  # next circle does not matter
+        self.assertIsNotNone(plan(Chase(), 30.0, [hunter(5, (150, 0, 0))], {5: 29.0}, zone=z))
     def test_wounded_fought_hunter_is_chased(self):
         p = plan(Chase(), 30.0, [hunter(5, (150, 0, 0))], {5: 29.0})
         self.assertIsNotNone(p)
         self.assertAlmostEqual(p["move"][0], 1.0, places=3)
         self.assertEqual(p["id"], 5)
 
-    def test_healthy_or_unfought_or_far_hunter_is_not(self):
-        self.assertIsNone(plan(Chase(), 30.0, [hunter(5, (150, 0, 0), hp=1300)], {5: 29.0}))
-        self.assertIsNone(plan(Chase(), 30.0, [hunter(5, (150, 0, 0))], {}))  # not fighting it
-        self.assertIsNone(plan(Chase(), 30.0, [hunter(5, (150, 0, 0))], {5: 20.0}))  # last hit too old
-        far = chase.CHASE_START_RANGE + 10
-        self.assertIsNone(plan(Chase(), 30.0, [hunter(5, (far, 0, 0))], {5: 29.0}))
 
-    def test_hit_by_counts_as_fighting(self):
-        c = Chase()
-        self.assertIsNotNone(c.plan(30.0, me(), [hunter(5, (150, 0, 0))], {}, {5: 29.5}, ZONE, clear_all))
-
-    def test_needs_laser_and_hp_floor(self):
-        self.assertIsNone(plan(Chase(), 30.0, [hunter(5, (150, 0, 0))], {5: 29.0}, me(weapons=[gun(), None])))
-        low = int(1400 * chase.CHASE_SELF_HP) - 1
-        self.assertIsNone(plan(Chase(), 30.0, [hunter(5, (150, 0, 0))], {5: 29.0}, me(hp=low)))
 
     def test_once_chasing_keeps_going_past_start_range(self):
         c = Chase()
@@ -60,14 +71,6 @@ class ChaseUnit(unittest.TestCase):
         self.assertIsNotNone(p)
         self.assertTrue(p["boost"])  # far and regen is near: close in fast
 
-    def test_another_hunter_aborts_and_is_remembered(self):
-        c = Chase()
-        self.assertIsNotNone(plan(c, 30.0, [hunter(5, (150, 0, 0))], {5: 29.0}))
-        self.assertIsNone(plan(c, 30.5, [hunter(5, (150, 0, 0)), hunter(6, (0, 150, 0), hp=1400)], {5: 29.0}))
-        # the other one left the track list, but it is still in memory: no new chase
-        self.assertIsNone(plan(c, 31.0, [hunter(5, (150, 0, 0))], {5: 30.9}))
-        # memory expired: chase again
-        self.assertIsNotNone(plan(c, 30.5 + chase.OTHER_MEMORY_S + 0.1, [hunter(5, (150, 0, 0))], {5: 35.5}))
 
     def test_follows_last_known_position_then_gives_up(self):
         c = Chase()
@@ -99,12 +102,6 @@ class ChaseUnit(unittest.TestCase):
         self.assertFalse(plan(Chase(), 30.0, [hunter(5, (chase.CHASE_BOOST_RANGE + 10, 0, 0))], {5: 29.5},
                               me(energy=chase.CHASE_BOOST_ENERGY - 1))["boost"])
 
-    def test_prey_near_zone_edge_or_outside_next_circle_aborts(self):
-        edge = 560 - chase.ZONE_MARGIN + 5
-        self.assertIsNone(plan(Chase(), 30.0, [hunter(5, (edge, 0, 0))], {5: 29.0}, me(pos=(edge - 120, 0, 0))))
-        # shrink to radius 100 starting now: the prey at 150 m from centre will be outside soon
-        z = dict(ZONE, next_radius=100, shrink_start=30, shrink_end=32)
-        self.assertIsNone(plan(Chase(), 30.0, [hunter(5, (150, 0, 0))], {5: 29.0}, zone=z))
 
     def test_healed_prey_is_dropped(self):
         c = Chase()
@@ -123,33 +120,10 @@ class ChaseUnit(unittest.TestCase):
         c.forget(5)
         self.assertIsNone(plan(c, 30.1, [], {5: 29.0}))
 
-    def test_unseen_attacker_aborts(self):
-        c = Chase()
-        self.assertIsNone(c.plan(30.0, me(), [hunter(5, (150, 0, 0))], {5: 29.0}, {9: 29.9}, ZONE, clear_all))
-        self.assertIsNone(c.plan(30.0, me(), [hunter(5, (150, 0, 0))], {5: 29.0}, {None: 29.9}, ZONE, clear_all))
-        self.assertIsNotNone(c.plan(30.0, me(), [hunter(5, (150, 0, 0))], {5: 29.0}, {5: 29.9, 9: 20.0},
-                                    ZONE, clear_all))
-
-    def test_observe_keeps_sightings_while_plan_is_skipped(self):
-        c = Chase()
-        c.observe(30.0, [hunter(7, (0, 150, 0), hp=1400)])
-        self.assertIsNone(plan(c, 30.1, [hunter(5, (150, 0, 0))], {5: 30.0}))
 
     def test_id_none_is_never_prey(self):
         self.assertIsNone(plan(Chase(), 30.0, [hunter(None, (150, 0, 0))], {None: 29.0}))
 
-    def test_backoff_gate(self):
-        old = chase.CHASE_NEEDS_BACKOFF
-        chase.CHASE_NEEDS_BACKOFF = 1
-        try:
-            coming = hunter(5, (150, 0, 0))
-            coming["vel"] = [-10, 0, 0]
-            self.assertIsNone(plan(Chase(), 30.0, [coming], {5: 29.0}))
-            going = hunter(5, (150, 0, 0))
-            going["vel"] = [10, 0, 0]
-            self.assertIsNotNone(plan(Chase(), 30.0, [going], {5: 29.0}))
-        finally:
-            chase.CHASE_NEEDS_BACKOFF = old
 
 
 class ChaseInBot(unittest.TestCase):
@@ -191,13 +165,6 @@ class ChaseInBot(unittest.TestCase):
 
     HIT = {"type": "hit", "target": 5, "amount": 300, "weapon": "laser"}
 
-    def test_bot_observes_while_capturing(self):
-        b = Bot(HELLO)
-        drop = {"id": 1, "pos": [3, 0, 0], "radius": 8, "lands_in": 0, "holder": None}
-        b.act(self.obs(30.0, [hunter(5, (170, 0, 0)), hunter(6, (0, 180, 0), hp=1400)], [self.HIT], drops=[drop]))
-        a = b.act(self.obs(30.5, [hunter(5, (170, 0, 0))], [self.HIT]))
-        self.assertIsNone(b.chaser.prey)  # 6 is remembered: no chase
-        self.assertLess(a["move"][0], 0.5)
 
     def test_look_at_keeps_held_laser_aim(self):
         b = Bot(HELLO)
@@ -228,6 +195,14 @@ class ChaseInBot(unittest.TestCase):
         a = b.act(self.obs(30.0, [hunter(5, (170, 0, 0))], [self.HIT]))
         self.assertLess(a["move"][1], -0.5)
         self.assertIsNone(b.chaser.prey)
+
+    def test_low_hp_chases_a_far_hunter_but_never_walks_at_a_near_one(self):
+        b = Bot(HELLO)
+        a = b.act(self.obs(30.0, [hunter(5, (170, 0, 0))], [self.HIT], hp=500))
+        self.assertGreater(a["move"][0], 0.9)
+        b = Bot(HELLO)
+        a = b.act(self.obs(30.0, [hunter(5, (100, 0, 0))], [self.HIT], hp=500))
+        self.assertLessEqual(a["move"][0], 1e-6)  # fight.py's rule under 45% HP still holds
 
     def test_bot_without_chase_module_keeps_v3(self):
         import bot as botmod
