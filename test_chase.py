@@ -219,7 +219,7 @@ class ChaseInBot(unittest.TestCase):
 
     def test_fight_chase_stays_off(self):
         import fight
-        self.assertEqual(fight.CHASE_HP, 0.0)  # chase.py is the only chase
+        self.assertFalse(hasattr(fight, "CHASE_HP"))  # fight.py has no chase: chase.py is the only chase
 
     def test_fight_hiding_beats_chase(self):
         import fight
