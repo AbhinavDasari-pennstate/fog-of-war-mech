@@ -993,6 +993,44 @@ class TestLineOfFire(Base):
         self.assertTrue(self.shoot(bot, (100, 0, 0), [gun(), laser()])["fire"][1] is False)  # blocked laser
         self.assertTrue(self.shoot(bot, (100, 60, 0), [gun(), laser()])["fire"][1])         # clear laser
 
+    def retreat_obs(self, pos, hp, enemy=(100, 0, 0), **kw):
+        return make_obs(pos=pos, hp=hp, weapons=[gun(), laser()], mechs=[mech(5, enemy)],
+                        events=[{"type": "damaged", "amount": 45, "weapon": "gun", "bearing": 0.0, "by": 5}], **kw)
+
+    def test_hurt_walks_to_the_nearest_spot_the_shooter_cannot_see(self):
+        bot = self.bot_with(self.BUILDING)  # we stand at (30, 40) in its view; behind the building's corner is hidden
+        a = bot.act(self.retreat_obs((30, 40, 0), 300))
+        self.assertTrue(bot.retreating)
+        self.assertLess(a["move"][1], -0.5)  # down toward the building's shadow
+        self.assertGreater(bot.act(self.retreat_obs((30, 40, 0), 1400, tick=2))["move"][1], -0.5)  # healthy: no
+
+    def test_hidden_and_hurt_holds_still_without_firing_until_80_percent(self):
+        low_wall = {"kind": "building", "base": -10, "top": 6, "ring": [33, -20, 36, -20, 36, 20, 33, 20]}
+        bot = self.bot_with(low_wall)  # it cannot see our body behind the wall; our muzzle clears it
+        self.assertTrue(self.shoot(bot, (100, 0, 0))["fire"][0])  # healthy: we shoot over it
+        bot = self.bot_with(low_wall)
+        a = bot.act(self.retreat_obs((30, 0, 0), 300))
+        self.assertEqual(a["move"], [0.0, 0.0])
+        self.assertEqual(a["fire"], [False, False])
+        a = bot.act(self.retreat_obs((30, 0, 0), 1000, tick=2))  # 71%: still resting
+        self.assertEqual(a["fire"], [False, False])
+        self.assertTrue(bot.retreating)
+        bot.act(self.retreat_obs((30, 0, 0), 1150, tick=3))  # 82%: fight again
+        self.assertFalse(bot.retreating)
+
+    def test_no_hiding_when_cornered_or_outside_the_zone(self):
+        bot = self.bot_with(self.BUILDING)
+        bot.act(self.retreat_obs((30, 40, 0), 300, enemy=(30, 55, 0)))  # 15 m away: fight back
+        self.assertIsNone(bot.cover)
+        bot = self.bot_with(self.BUILDING)
+        bot.act(self.retreat_obs((30, 40, 0), 300, in_zone=False))
+        self.assertFalse(bot.retreating)
+
+    def test_no_cover_in_reach_fights_on_as_before(self):
+        bot = self.bot_with()  # open ground
+        bot.act(self.retreat_obs((30, 40, 0), 300))
+        self.assertFalse(bot.retreating)
+
     def test_holes_and_low_roofs_do_not_block(self):
         holed = dict(self.BUILDING, holes=[[30, -5, 70, -5, 70, 5, 30, 5]])
         self.assertTrue(self.shoot(self.bot_with(holed), (100, 0, 0))["fire"][0])

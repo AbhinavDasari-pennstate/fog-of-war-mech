@@ -2,6 +2,7 @@
 import json
 import math
 import os
+import time
 import traceback
 import mechfight as mf
 
@@ -40,9 +41,14 @@ GRAB_KINDS = ("laser", "lightning")  # preference order; mortar is never picked 
 FREE_N = 20  # decisions of free movement that end a detour early
 DETOUR_SAME_M, DETOUR_SAME_S = 10.0, 20.0  # stuck again this close to the last detour's start this soon: same obstacle
 DETOUR_ANGLES = (1.2, 1.6, 2.0, 2.4)  # detour heading off the goal (rad), wider each time the same obstacle holds us
+RETREAT_HP, RETURN_HP = 0.30, 0.80  # under RETREAT_HP go to cover; hold fire there until RETURN_HP (regen: 5 s calm)
+COVER_RINGS, COVER_DIRS = (5, 10, 15, 20, 25, 30), 8  # cover search: rings (m) x directions, nearest first
+THREAT_M, CORNER_M = 200.0, 20.0  # mechs this close count for cover; one this close: fight back, no hiding
+COVER_RECHECK_S = 0.5  # reuse a found spot (or a miss) this long; a found spot is re-tested every decision
+COVER_BUDGET_MS = 8.0  # a search stops here (the real map, no cover in reach, costs up to about 35 ms)
 ENGAGE_S = 5.0  # a mech that hit us or that we hit stays a target this long (protocol memory_s)
 STATE = ("stuck", "detour", "detour_sign", "detour_end", "free_n", "detour_at", "detour_lvl", "edge_sign", "edge_until", "dodge_sign",
-         "dodge_t", "dodge_flip_t", "full_t", "lt_t", "lt_aim", "threat_yaw", "threat_t", "dmg_t")
+         "dodge_t", "dodge_flip_t", "full_t", "lt_t", "lt_aim", "threat_yaw", "threat_t", "dmg_t", "retreating", "cover")
 SOUND_KINDS = ("gun", "laser", "laser_charge", "lightning", "mortar")
 
 
@@ -126,6 +132,8 @@ class Bot:
         self.free_n = 0
         self.detour_at = None   # (x, y, t) where the last detour started
         self.detour_lvl = 0     # index into DETOUR_ANGLES
+        self.retreating = False  # under RETREAT_HP until back at RETURN_HP
+        self.cover = None       # (x, y, t found) of the spot we are walking to
         self.threat_yaw = None  # bearing of the last hit (or weapon sound when not hit)
         self.threat_t = -99.0
         self.dmg_t = -99.0      # last weapon damage taken
@@ -436,6 +444,34 @@ class Bot:
         self.chase.setdefault(best["id"], t)  # first time we went for it; kept if it leaves view
         return best
 
+    def cover_spot(self, t, x, y, z, threats):
+        """(x, y) if no threat sees us here, else the nearest spot within COVER_RINGS that none can see and that we
+        can walk straight to, else None. A found spot is kept COVER_RECHECK_S while it stays hidden."""
+        def hidden(px, py):
+            c = (px, py, z + 4.5)
+            return all(not raylib.clear((m["pos"][0], m["pos"][1], m["pos"][2] + 8.0), c) for m in threats)
+        if hidden(x, y):
+            return (x, y)
+        c = self.cover
+        if c is not None and t - c[2] < COVER_RECHECK_S:
+            if c[0] is None:
+                return None  # searched a moment ago: nothing in reach
+            if hidden(c[0], c[1]):
+                return c[:2]
+        self.cover = (None, None, t)
+        runs = {}
+        t0 = time.perf_counter()
+        for r in COVER_RINGS:
+            for k in range(COVER_DIRS):
+                if (time.perf_counter() - t0) * 1000 > COVER_BUDGET_MS:
+                    return None
+                ang = k * TAU / COVER_DIRS
+                px, py = x + r * math.cos(ang), y + r * math.sin(ang)
+                if hidden(px, py) and runs.setdefault(k, self.free_run(x, y, z, ang, COVER_RINGS[-1] + 3)) >= r:
+                    self.cover = (px, py, t)
+                    return (px, py)
+        return None
+
     def pick_drop(self, obs, me, mechs, ccx, ccy, cr):
         """A supply drop we can reach by the time it lands, inside the zone, with nobody near it or us."""
         if self.lite or obs["t"] - self.dmg_t < 3:
@@ -665,6 +701,23 @@ class Bot:
             mx, my = cp["move"]
 
         flee = hp_frac < 0.45 and not self._fight_on()
+        # ---- hurt: walk to the nearest spot no mech within THREAT_M can see, hold fire there until RETURN_HP ----
+        threats = [m for m in mechs if math.dist(m["pos"][:2], (x, y)) < THREAT_M][:3]
+        if hp_frac >= RETURN_HP or not threats or urgent or raylib is None or self.lite:
+            self.retreating, self.cover = False, None  # urgent (outside or near the zone edge) beats hiding
+        elif hp_frac < RETREAT_HP:
+            self.retreating = True
+        cornered = any(math.dist(m["pos"][:2], (x, y)) < CORNER_M for m in threats)
+        if self.retreating and not cornered:
+            spot = self.cover_spot(t, x, y, z, threats)
+            if spot == (x, y):
+                mx = my = 0.0
+                rest = True  # hidden: no shots, so regen can start
+            elif spot is not None:
+                mx, my = unit(spot[0] - x, spot[1] - y)
+                grab = drop = goal = cp = None
+            else:
+                self.retreating = False  # no cover in reach: fight on as before
         if hp_frac < 0.45 and not flee and in_zone and not (fp and fp["reason"] == "chase"):
             near = [unit(m["pos"][0] - x, m["pos"][1] - y) for m in mechs[:3] if math.dist(m["pos"][:2], (x, y)) < 120]
             for _ in range(4):  # hurt and fighting: still never walk at a near mech (no flee push); repeat for 2+
