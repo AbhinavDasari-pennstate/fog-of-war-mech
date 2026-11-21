@@ -77,6 +77,16 @@ class TestBotHook(unittest.TestCase):
         self.assertEqual(bot.loot.seen, {})
         self.assertLess(abs(a["move"][0]), 0.9)
 
+    def test_economy_phase_keeps_obs_pickups(self):
+        bot = Bot(HELLO)
+        bot.act(make_obs(t=0.0, pickups=[pickup(1, "laser", (0, 80, 0))], aim=(1.57, 0.0), zone=ZONE))
+        if bot.eco is None:
+            self.skipTest("no economy module")
+        bot.eco.phase, bot.eco.phase_t = "rest", 2.9
+        a = bot.act(make_obs(t=3.0, tick=2, pos=(0, 30, 0), aim=(-1.57, 0.0), zone=ZONE))
+        self.assertIn(1, bot.loot.seen)  # still remembered for later
+        self.assertLess(a["move"][1], 0.5)  # but economy's phase decides now, as before
+
     def test_off_means_obs_only(self):
         loot_mem.LOOT_MEM_S, saved = 0.0, loot_mem.LOOT_MEM_S
         try:

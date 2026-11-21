@@ -608,7 +608,8 @@ class Bot:
                 eye = (x, y, z + me["stats"].get("eye_height", 8))
                 self.loot.update(obs, me, self.vis_near, lambda p: self.in_view(me, p) and (
                     raylib is None or raylib.clear(eye, (p["pos"][0], p["pos"][1], p["pos"][2] + 1.0))))
-                seen_obs = dict(obs, pickups=self.loot.pickups())
+                if self.eco is None or self.eco.phase is None:  # economy's loot/rest phase: obs pickups, as before
+                    seen_obs = dict(obs, pickups=self.loot.pickups())
             except Exception:
                 self.loot_errors += 1  # broken once: obs pickups only for the rest of the match
                 mf.log(f"loot memory failed, obs pickups from now on: {traceback.format_exc()}")
