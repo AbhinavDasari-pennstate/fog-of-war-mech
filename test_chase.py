@@ -209,6 +209,16 @@ class ChaseInBot(unittest.TestCase):
         a = b.act(self.obs(30.0, [hunter(5, (100, 0, 0)), hunter(6, (40, 80, 0), hp=1400)], hp=500))  # no hit yet: boost due
         self.assertFalse(a["boost"])
 
+    def test_no_chase_while_economy_rests_after_a_kill(self):
+        b = Bot(HELLO)
+        if b.eco is None:
+            self.skipTest("economy module missing")
+        b.eco.phase = "rest"
+        b.eco.plan = lambda *a, **k: ("rest", None)
+        a = b.act(self.obs(30.0, [hunter(5, (170, 0, 0))]))
+        self.assertIsNone(b.chaser.prey)
+        self.assertFalse(a["boost"])
+
     def test_bot_without_chase_module_keeps_v3(self):
         import bot as botmod
         saved = botmod.chaselib

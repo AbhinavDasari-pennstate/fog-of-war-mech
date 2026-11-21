@@ -622,7 +622,7 @@ class Bot:
             mx, my = fp["move"]
         # ---- chase a wounded hunter so it cannot regen (chase.py): beats loot and zone positioning ----
         capturing = drop is not None and dgoal < drop.get("radius", 8) - 2
-        cp = self._chase_plan(t, me, mechs, zone, in_zone and not urgent and not capturing and not hiding)
+        cp = self._chase_plan(t, me, mechs, zone, in_zone and not urgent and not capturing and not hiding and not rest)
         if cp is not None:
             grab = drop = goal = None
             mx, my = cp["move"]
@@ -781,7 +781,8 @@ class Bot:
             k = min(1.0, 4.5 / max(me["stats"].get("walk_speed", 11.7), 0.1))
             mx, my = mx * k, my * k
         energy_ok = me["energy"] > 25 and me["grounded"] and n > 0
-        boost = bool(urgent and energy_ok) or bool(goal is not None and loot is None and in_zone and dgoal > 12 and energy_ok)             or bool(dodge_boost and energy_ok) or bool(cp is not None and cp["boost"] and energy_ok and self.stuck < 2
+        boost = bool(urgent and energy_ok) or bool(goal is not None and loot is None and in_zone and dgoal > 12 and energy_ok) \
+            or bool(dodge_boost and energy_ok) or bool(cp is not None and cp["boost"] and energy_ok and self.stuck < 2
                  and mx * cp["move"][0] + my * cp["move"][1] > 0.9 * n)  # only while still heading at it
         act.update(move=[mx, my], boost=boost or jet, jump=jump)
 
