@@ -700,7 +700,7 @@ class TestFleeAndDodge(Base):
             a = self.act(make_obs(tick=i, t=50 + i / 10, mechs=[e], vel=(0, 5, 0)))  # moving: no stuck detour
             self.assertAlmostEqual(math.hypot(*a["move"]), 1.0)
             self.assertAlmostEqual(a["move"][0], 0.0)  # across the line, not along it
-            self.assertTrue(a["boost"])
+            self.assertFalse(a["boost"])  # shooter is 120 m away: no need to burn energy
             moves.append(a["move"][1])
         self.assertEqual(len(set(moves)), 1)  # same side for the whole charge
 
@@ -758,10 +758,33 @@ class TestGunGate(Base):
         a = self.act(make_obs(tick=2, mechs=[e2], aim=(base2[0] + 0.04, base2[1])))
         self.assertTrue(a["fire"][0])  # 0.04 rad is only 1.2 m at 30 m
 
-    def test_no_fire_at_a_track_beyond_sight_even_when_hit(self):
+    HIT = [{"type": "damaged", "amount": 45, "weapon": "gun", "bearing": 0.0, "by": 5}]
+
+    def test_returns_fire_at_a_hitting_track_beyond_sight(self):
         e = mech(5, (215, 0, 0))
-        ev = [{"type": "damaged", "amount": 45, "weapon": "gun", "bearing": 0.0, "by": 5}]
-        obs = make_obs(mechs=[e], events=ev)
+        obs = make_obs(mechs=[e], events=self.HIT)
+        obs["self"]["aim"], _ = self.bot.lead_aim(obs["self"], e, 252)
+        self.assertTrue(self.act(obs)["fire"][0])
+
+    def test_return_fire_window_is_three_seconds(self):
+        e = mech(5, (215, 0, 0))
+        obs = make_obs(t=30, mechs=[e], events=self.HIT)
+        obs["self"]["aim"], _ = self.bot.lead_aim(obs["self"], e, 252)
+        self.assertTrue(self.act(obs)["fire"][0])
+        self.assertTrue(self.act(dict(obs, tick=2, t=32.9, events=[]))["fire"][0])
+        self.assertFalse(self.act(dict(obs, tick=3, t=33.5, events=[]))["fire"][0])
+
+    def test_old_hits_do_not_make_an_unseen_track_a_target(self):
+        e = mech(5, (215, 0, 0))
+        obs = make_obs(t=30, weapons=[gun(), laser(cooldown=1.0)], mechs=[e], events=self.HIT)  # a laser keeps us engaged
+        obs["self"]["aim"], _ = self.bot.lead_aim(obs["self"], e, 252)
+        self.assertTrue(self.act(obs)["fire"][0])
+        self.assertFalse(self.act(dict(obs, tick=2, t=40, events=[]))["fire"][0])  # hit 10 s ago, still unseen
+
+    def test_no_fire_at_an_unseen_track_that_is_only_aimed_at_us(self):
+        e = mech(5, (215, 0, 0))
+        e["aim"] = [math.pi, 0.0]
+        obs = make_obs(mechs=[e])
         obs["self"]["aim"], _ = self.bot.lead_aim(obs["self"], e, 252)
         self.assertFalse(self.act(obs)["fire"][0])
         obs["self"]["stats"]["vision_bonus"] = 25  # sensors upgrade: it can be seen now
@@ -818,6 +841,10 @@ class TestLineOfFire(Base):
         self.assertTrue(self.shoot(self.bot_with(low), (100, 0, 30))["fire"][0])
         self.assertFalse(self.shoot(self.bot_with(high), (100, 0, 30))["fire"][0])
 
+    def test_return_fire_beyond_sight_still_needs_a_clear_line(self):
+        self.assertFalse(self.shoot(self.bot_with(self.BUILDING), (215, 0, 0))["fire"][0])
+        self.assertTrue(self.shoot(self.bot_with(), (215, 0, 0))["fire"][0])
+
     def test_unreadable_map_means_no_line_of_fire_check(self):
         hello = copy.deepcopy(HELLO)
         hello["map"]["dir"] = os.path.join(HERE, "no-such-dir")
@@ -860,6 +887,267 @@ class TestSupplyDrop(Base):
     def test_weapon_grab_comes_before_the_drop(self):
         a = self.act(make_obs(t=100, drops=[self.drop()], pickups=[pickup(1, "laser", (0, 50, 0))]))
         self.assertGreater(a["move"][1], 0.9)
+
+
+class TestSideStep(Base):
+    def shooter(self, pos):
+        e = mech(5, pos)
+        e["aim"] = [math.atan2(-pos[1], -pos[0]), 0.0]
+        e["charging"] = True
+        return e
+
+    def test_boost_only_when_the_shooter_is_close(self):
+        a = self.act(make_obs(mechs=[self.shooter((40, 0, 0))], vel=(0, 5, 0)))
+        self.assertTrue(a["boost"])
+        a = self.act(make_obs(tick=2, mechs=[self.shooter((120, 0, 0))], vel=(0, 5, 0)))
+        self.assertFalse(a["boost"])
+
+    def test_side_alternates_every_half_second(self):
+        e = self.shooter((120, 0, 0))
+        signs = []
+        for i in range(12):
+            a = self.act(make_obs(tick=i, t=50 + i / 10, mechs=[e], vel=(0, 5, 0)))
+            signs.append(1 if a["move"][1] > 0 else -1)
+        self.assertEqual(len(set(signs[:5])), 1)
+        self.assertEqual(signs[5:10], [-signs[0]] * 5)
+        self.assertEqual(signs[10], signs[0])
+
+    def test_no_sidestep_while_fleeing(self):
+        a = self.act(make_obs(hp=400, mechs=[self.shooter((100, 0, 0))], vel=(0, 5, 0)))
+        self.assertAlmostEqual(a["move"][1], 0.0)
+        self.assertLess(a["move"][0], 0.0)
+
+    def test_no_sidestep_when_the_zone_edge_is_close(self):
+        a = self.act(make_obs(pos=(540, 0, 0), mechs=[self.shooter((640, 0, 0))], vel=(5, 0, 0)))
+        self.assertLess(a["move"][0], -0.9)
+
+
+class TestDropGuards(Base):
+    def drop(self):
+        return {"id": 20000, "pos": [35, -18, 0], "radius": 8, "lands_in": 0, "capture_s": 4, "progress": 0, "holder": None}
+
+    def test_a_mech_within_150_m_blocks_the_drop(self):
+        a = self.act(make_obs(t=100, drops=[self.drop()], mechs=[mech(5, (-120, 0, 0))]))
+        self.assertAlmostEqual(math.hypot(*a["move"]), 0.0)
+        a = self.act(make_obs(tick=2, t=100, drops=[self.drop()], mechs=[mech(5, (-170, 0, 0))]))
+        self.assertGreater(a["move"][0], 0.5)
+
+    def test_a_mech_near_the_drop_blocks_it_even_when_far_from_us(self):
+        far_drop = dict(self.drop(), pos=[140, 0, 0])
+        a = self.act(make_obs(t=100, drops=[far_drop], mechs=[mech(5, (190, 0, 0))]))  # 190 m from us, 50 m from it
+        self.assertAlmostEqual(math.hypot(*a["move"]), 0.0)
+        a = self.act(make_obs(tick=2, t=100, drops=[far_drop], mechs=[mech(5, (210, 0, 0))]))  # 70 m from it
+        self.assertGreater(a["move"][0], 0.5)
+
+    def test_recent_damage_blocks_the_drop_for_three_seconds(self):
+        hit = [{"type": "damaged", "amount": 45, "weapon": "gun", "bearing": 3.0, "by": 5}]
+        a = self.act(make_obs(t=100, drops=[self.drop()], events=hit))
+        self.assertAlmostEqual(math.hypot(*a["move"]), 0.0)
+        a = self.act(make_obs(tick=2, t=102.9, drops=[self.drop()]))
+        self.assertAlmostEqual(math.hypot(*a["move"]), 0.0)
+        a = self.act(make_obs(tick=3, t=103.5, drops=[self.drop()]))
+        self.assertGreater(a["move"][0], 0.5)
+
+    def test_holding_in_the_ring_clears_a_detour(self):
+        bot = Bot(HELLO)
+        for i in range(6):  # stuck on the way: a detour starts
+            bot.act(make_obs(tick=i, t=100 + i / 10, drops=[self.drop()], vel=(0, 0, 0)))
+        self.assertGreater(bot.detour, 0)
+        obs = make_obs(tick=9, t=101, pos=(33, -17, 0), drops=[self.drop()], vel=(0, 0, 0))
+        a = bot.act(obs)
+        self.assertEqual(a["move"], [0.0, 0.0])
+        self.assertEqual(bot.detour, 0)
+
+
+class TestLaserGrace(Base):
+    def setUp(self):
+        super().setUp()
+        self.e = mech(5, (150, 20, 0))
+        self.want = self.direct_aim((0, 0, 0), self.e["pos"])
+
+    def test_holds_charge_and_aim_for_half_a_second_after_the_target_leaves_view(self):
+        a = self.act(make_obs(t=30, aim=self.want, weapons=[gun(), laser(charge=0.3)], mechs=[self.e]))
+        self.assertTrue(a["fire"][1])
+        a = self.act(make_obs(tick=2, t=30.3, aim=self.want, weapons=[gun(), laser(charge=0.6)], mechs=[]))
+        self.assertTrue(a["fire"][1])
+        self.assertAlmostEqual(a["aim"][0], self.want[0])
+        self.assertAlmostEqual(a["aim"][1], self.want[1])
+        a = self.act(make_obs(tick=3, t=30.6, aim=self.want, weapons=[gun(), laser(charge=0.75)], mechs=[]))
+        self.assertFalse(a["fire"][1])  # more than 0.5 s since it was in view
+
+    def test_no_grace_without_a_charge_or_when_fleeing(self):
+        self.act(make_obs(t=30, aim=self.want, weapons=[gun(), laser(charge=0.3)], mechs=[self.e]))
+        a = self.act(make_obs(tick=2, t=30.1, weapons=[gun(), laser(charge=0.0)], mechs=[]))
+        self.assertFalse(a["fire"][1])
+        a = self.act(make_obs(tick=3, t=30.2, hp=400, weapons=[gun(), laser(charge=0.4)], mechs=[]))
+        self.assertFalse(a["fire"][1])
+
+    def test_a_full_charge_in_grace_is_let_go_once_overdue(self):
+        off = (self.want[0] + 0.3, self.want[1])  # full charge but off target: holds
+        for i, t_ in enumerate((30.0, 30.3, 30.45)):
+            a = self.act(make_obs(tick=i, t=t_, aim=off, weapons=[gun(), laser(charge=0.75)], mechs=[self.e]))
+            self.assertTrue(a["fire"][1])
+        a = self.act(make_obs(tick=9, t=30.52, aim=off, weapons=[gun(), laser(charge=0.75)], mechs=[]))
+        self.assertFalse(a["fire"][1])  # target just left view, but the full charge is overdue
+
+
+class TestStateRestore(Base):
+    def test_failed_pass_leaves_no_counters_behind(self):
+        class Flaky(Bot):
+            def los_clear(self, me, tgt):
+                if not self.lite:
+                    raise IndexError("map")
+                return True
+
+        bot = Flaky(HELLO)
+        obs = make_obs(t=3, pickups=[pickup(1, "laser", (60, 0, 0))], mechs=[mech(5, (100, 0, 0))], vel=(0, 0, 0))
+        for i in range(3):
+            bot.act(dict(obs, tick=i + 1, t=3 + i / 10))
+        self.assertEqual(bot.stuck, 3)  # once per decision, not twice
+        self.assertEqual(bot.errors, 3)
+        self.assertEqual(bot.chase, {1: 3})
+
+    def test_events_are_counted_once_when_a_pass_fails(self):
+        class Flaky(Bot):
+            def los_clear(self, me, tgt):
+                if not self.lite:
+                    raise IndexError("map")
+                return True
+
+        bot = Flaky(HELLO)
+        ev = [{"type": "take_failed", "id": 7, "reason": "range"}]
+        bot.act(make_obs(t=3, mechs=[mech(5, (100, 0, 0))], events=ev))
+        self.assertEqual(bot.fails, {7: 1})
+        self.assertEqual(bot.skip, set())
+        bot.act(make_obs(tick=2, t=3.1, mechs=[mech(5, (100, 0, 0))],
+                         events=[{"type": "take_failed", "id": 8, "reason": "gone"}]))
+        self.assertEqual(bot.skip, {8})
+
+
+class TestLineOfFireCost(Base):
+    def world_bot(self, cls=Bot):
+        prisms = []
+        for gx in range(-8, 9):
+            for gy in range(-8, 9):
+                x, y = gx * 40, gy * 40
+                prisms.append({"kind": "building", "base": -10, "top": 30,
+                               "ring": [x + 5, y + 5, x + 25, y + 5, x + 25, y + 25, x + 5, y + 25]})
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        os.makedirs(os.path.join(d, "v2"))
+        with open(os.path.join(d, "v2", "world.json"), "w") as f:
+            json.dump({"prisms": prisms}, f)
+        hello = copy.deepcopy(HELLO)
+        hello["map"]["dir"] = d
+        return cls(hello)
+
+    def crowd(self):
+        out = [mech(99, (112, 12, 0))]  # the nearest one, straight ahead
+        for k in range(15):
+            ang = -0.9 + k * 0.12
+            r = 120 + 5 * k
+            out.append(mech(k + 1, (r * math.cos(ang), r * math.sin(ang), 0)))
+        return out
+
+    def test_at_most_four_lines_of_fire_per_decision(self):
+        calls = []
+
+        class Counting(Bot):
+            def _los_raw(self, me, tgt):
+                calls.append(tgt["id"])
+                return super()._los_raw(me, tgt)
+
+        bot = self.world_bot(Counting)
+        obs = make_obs(pos=(12, 12, 0), weapons=[gun(), laser()], mechs=self.crowd())
+        bot.act(obs)
+        self.assertLessEqual(len(calls), 4)
+        self.assertEqual(len(calls), len(set(calls)))  # each mech at most once per decision
+        calls.clear()
+        bot.act(dict(obs, tick=2))
+        self.assertLessEqual(len(calls), 4)  # the cache does not leak across decisions
+
+    def test_worst_case_decision_time(self):
+        bot = self.world_bot()
+        times = []
+        for i in range(150):
+            obs = make_obs(tick=i, t=30 + i / 10, pos=(12 + i % 7, 12, 0), weapons=[gun(), laser()], mechs=self.crowd(),
+                           events=[{"type": "damaged", "amount": 45, "weapon": "gun", "bearing": 0.0, "by": 5}])
+            t0 = time.perf_counter()
+            bot.act(obs)
+            times.append((time.perf_counter() - t0) * 1000)
+        self.assertLess(max(times), 10.0, f"slowest decision {max(times):.2f} ms")
+        print(f"\nlos worst case: max {max(times):.2f} ms", file=sys.stderr)
+
+
+def find_arena():
+    for p in (os.environ.get("MECHFIGHT_ARENA", ""), os.path.join(HERE, "..", "kit", "mechfight-kit", "arena")):
+        if p and os.path.exists(os.path.join(p, "v2", "world.json")):
+            return p
+    return None
+
+
+class TestRealMapCost(unittest.TestCase):
+    @unittest.skipUnless(find_arena(), "kit arena not found (set MECHFIGHT_ARENA)")
+    def test_fifteen_mechs_around_us_on_the_real_map(self):
+        hello = copy.deepcopy(HELLO)
+        hello["map"]["dir"] = find_arena()
+        bot = Bot(hello)
+        self.assertGreater(len(bot.prisms), 100)
+        rng = random.Random(5)
+        times = []
+        for k in range(300):
+            cx, cy = rng.uniform(-300, 400), rng.uniform(-250, 330)
+            ms = []
+            for j in range(15):
+                ang, r = rng.uniform(-math.pi, math.pi), rng.uniform(60, 195)
+                ms.append(mech(j + 1, (cx + r * math.cos(ang), cy + r * math.sin(ang), 0)))
+            obs = make_obs(tick=k, t=30 + k / 10, pos=(cx, cy, 0), aim=(rng.uniform(-math.pi, math.pi), 0),
+                           weapons=[gun(), laser()], mechs=ms,
+                           events=[{"type": "damaged", "amount": 45, "weapon": "gun", "bearing": 0.0, "by": 5}])
+            t0 = time.perf_counter()
+            a = bot.act(obs)
+            times.append((time.perf_counter() - t0) * 1000)
+            self.assertEqual(problems(obs, a), [])
+        self.assertEqual(bot.errors, 0)
+        self.assertLess(max(times), 10.0, f"slowest decision {max(times):.2f} ms")
+        print(f"\nreal map, 15 mechs: max {max(times):.2f} ms", file=sys.stderr)
+
+
+class TestMapLog(Base):
+    def log_for(self, hello):
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            bot = Bot(hello)
+        return buf.getvalue(), bot
+
+    def test_hello_logs_how_many_prisms_loaded(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        os.makedirs(os.path.join(d, "v2"))
+        prism = {"kind": "building", "base": 0, "top": 20, "ring": [0, 0, 5, 0, 5, 5, 0, 5]}
+        with open(os.path.join(d, "v2", "world.json"), "w") as f:
+            json.dump({"prisms": [prism, prism, prism]}, f)
+        hello = copy.deepcopy(HELLO)
+        hello["map"]["dir"] = d
+        out, bot = self.log_for(hello)
+        self.assertEqual(len(bot.prisms), 3)
+        self.assertIn(f"map: prisms=3 dir={d}", out)
+
+    def test_hello_logs_zero_when_the_map_is_missing(self):
+        out, bot = self.log_for(copy.deepcopy(HELLO))  # /arena does not exist here
+        self.assertEqual(bot.prisms, [])
+        self.assertIn("map: prisms=0 dir=/arena", out)
+
+    @unittest.skipUnless(find_arena(), "kit arena not found (set MECHFIGHT_ARENA)")
+    def test_real_map_loads_259_prisms(self):
+        hello = copy.deepcopy(HELLO)
+        hello["map"]["dir"] = find_arena()
+        out, bot = self.log_for(hello)
+        self.assertEqual(len(bot.prisms), 259)
+        self.assertIsNotNone(bot.bounds)
+        self.assertIn("map: prisms=259", out)
 
 
 class TestDetour(Base):

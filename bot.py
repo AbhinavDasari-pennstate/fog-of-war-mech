@@ -10,6 +10,8 @@ TAU = 2 * math.pi
 UPGRADE_PRIO = ["armor", "plating", "nanites", "sensors", "servos", "gun_damage", "gun_rate"]
 GRAB_KINDS = ("laser", "lightning")  # preference order; mortar is never picked up
 FREE_N = 20  # decisions of free movement that end a detour early
+STATE = ("stuck", "detour", "detour_sign", "detour_end", "free_n", "edge_sign", "edge_until", "dodge_sign",
+         "dodge_t", "dodge_flip_t", "full_t", "lt_t", "lt_aim", "threat_yaw", "threat_t", "dmg_t")
 SOUND_KINDS = ("gun", "laser", "laser_charge", "lightning", "mortar")
 
 
@@ -70,6 +72,7 @@ class Bot:
         self.vis_near = v.get("near_range", 45)
         self.vis_fov = math.radians(v.get("fov_deg", 120))
         self.prisms, self.bounds = load_map(hello)
+        mf.log(f"map: prisms={len(self.prisms)} dir={hello.get('map', {}).get('dir')}")
         self.stuck = 0          # decisions in a row we wanted to move but barely did
         self.detour = 0         # decisions left on a sideways detour
         self.detour_sign = 1
@@ -85,6 +88,10 @@ class Bot:
         self.dodge_sign = 1
         self.edge_sign = 1
         self.lite = False       # degraded pass: skip the map-based extras
+        self.dodge_flip_t = -99.0
+        self.lt_t = -99.0       # last time a laser target was in view
+        self.lt_aim = None      # the aim we had on it
+        self._los_cache = {}    # mech id -> line of fire clear, per decision
         self.errors = 0
         self.edge_until = -99.0
         self.dodge_t = -99.0
@@ -132,6 +139,15 @@ class Bot:
         return abs(ang_diff(me["aim"][0], math.atan2(dy, dx))) <= self.vis_fov / 2 - 0.05
 
     def los_clear(self, me, tgt):
+        """Line of fire to a target, computed once per decision per mech id."""
+        key = tgt.get("id")
+        if key is None:
+            return self._los_raw(me, tgt)
+        if key not in self._los_cache:
+            self._los_cache[key] = self._los_raw(me, tgt)
+        return self._los_cache[key]
+
+    def _los_raw(self, me, tgt):
         """False when a building, stadium or bridge stands between our muzzle and the target's centre."""
         if not self.prisms or self.lite:
             return True
@@ -145,7 +161,7 @@ class Bot:
                 and p[5] >= loz and p[4] <= hiz]
         if not cand:
             return True
-        n = max(2, int(math.hypot(tx - x, ty - y)))
+        n = max(2, min(int(math.hypot(tx - x, ty - y) / 2.0), 120))  # 2 m steps, buildings are thicker
         for i in range(1, n):
             f = i / n
             px, py, pz = x + (tx - x) * f, y + (ty - y) * f, mz + (tz - mz) * f
@@ -195,9 +211,11 @@ class Bot:
 
     def pick_drop(self, obs, me, mechs, ccx, ccy, cr):
         """A supply drop we can reach by the time it lands, inside the zone, with nobody near it or us."""
-        if self.lite:
+        if self.lite or obs["t"] - self.dmg_t < 3:
             return None
         x, y, _ = me["pos"]
+        if any(math.dist(m["pos"][:2], (x, y)) < 150 for m in mechs):
+            return None
         best, bd = None, 150.0
         for d in obs.get("drops", []):
             if d.get("holder") not in (None, me.get("id")):
@@ -215,12 +233,17 @@ class Bot:
     def act(self, obs: mf.Observation) -> mf.Action:
         """One failing part must not cost the whole decision: retry without the map extras, then stand safe."""
         self.lite = False
+        snap = {k: getattr(self, k) for k in STATE}
+        sets = (set(self.skip), dict(self.fails), dict(self.chase))
         try:
             return self._decide(obs)
         except Exception:
             self.errors += 1
             if self.errors <= 3:
                 mf.log(f"decision degraded at tick {obs.get('tick')}: {traceback.format_exc()}")
+        for k, v in snap.items():  # the failed pass must not leave its counters behind
+            setattr(self, k, v)
+        self.skip, self.fails, self.chase = sets
         self.lite = True
         try:
             return self._decide(obs)
@@ -244,6 +267,7 @@ class Bot:
         return act
 
     def _decide(self, obs: mf.Observation) -> mf.Action:
+        self._los_cache = {}
         me = obs["self"]
         x, y, z = me["pos"]
         t = obs["t"]
@@ -257,7 +281,7 @@ class Bot:
                 self.dmg_t = t
                 if ev.get("bearing") is not None:
                     self.threat_yaw, self.threat_t = ev["bearing"], t
-            elif kind == "take_failed" and not self.lite:
+            elif kind == "take_failed":
                 pid = ev.get("id")
                 self.fails[pid] = self.fails.get(pid, 0) + 1
                 if ev.get("reason") == "gone" or self.fails[pid] >= 3:
@@ -337,18 +361,22 @@ class Bot:
                 mx, my = mx + ux * (55 - d) / 55, my + uy * (55 - d) / 55
 
         # ---- dodge: a laser charging at us (sidestep the line) or a mortar shell about to land near us ----
-        dodging = False
+        dodging = dodge_boost = False
         for m in mechs:
-            if not self.lite and m.get("charging") and m.get("aim"):
+            if not self.lite and not urgent and not flee and m.get("charging") and m.get("aim"):
                 bx, by = x - m["pos"][0], y - m["pos"][1]
-                if math.hypot(bx, by) < 300 and abs(ang_diff(m["aim"][0], math.atan2(by, bx))) < 0.3 and in_zone:
+                sd = math.hypot(bx, by)
+                if sd < 300 and abs(ang_diff(m["aim"][0], math.atan2(by, bx))) < 0.3:
                     ux, uy = unit(bx, by)
                     px, py = -uy, ux
-                    if t - self.dodge_t > 1.5:
+                    if t - self.dodge_t > 1.5:  # a new charge: pick a side
                         self.dodge_sign = 1 if (px * mx + py * my) >= 0 else -1
+                        self.dodge_flip_t = t
+                    elif t - self.dodge_flip_t >= 0.5:  # then alternate so a re-aiming shooter cannot lead us
+                        self.dodge_sign, self.dodge_flip_t = -self.dodge_sign, t
                     self.dodge_t = t
                     mx, my = px * self.dodge_sign, py * self.dodge_sign
-                    dodging = True
+                    dodging, dodge_boost = True, sd < 60
                     break
         for p in obs.get("projectiles", []):
             if self.lite or p.get("kind") != "mortar" or not in_zone:
@@ -368,7 +396,7 @@ class Bot:
                 else:
                     ux, uy = unit(x - lx, y - ly)
                 mx, my = ux, uy
-                dodging = True
+                dodging = dodge_boost = True
                 break
 
         # ---- free cubes nearby when calm ----
@@ -433,6 +461,8 @@ class Bot:
                 else:
                     self.detour_sign = 1
             self.detour = 25
+        if self.detour > 0 and not (mx or my):  # holding still on purpose (drop ring): no detour
+            self.detour = self.free_n = 0
         if self.detour > 0:
             self.free_n = self.free_n + 1 if speed > 5.0 else 0
             if self.free_n >= FREE_N:  # moving freely: assume we are round it, head for the goal again (same side next time)
@@ -457,7 +487,7 @@ class Bot:
             mx, my = mx * k, my * k
         energy_ok = me["energy"] > 25 and me["grounded"] and n > 0
         boost = bool(urgent and energy_ok) or bool(goal is not None and in_zone and dgoal > 12 and energy_ok) \
-            or bool(dodging and energy_ok)
+            or bool(dodge_boost and energy_ok)
         act.update(move=[mx, my], boost=boost or jet, jump=jump)
 
         # ---- aim and fire ----
@@ -471,7 +501,7 @@ class Bot:
         lt, aim_l, dl = None, None, 0.0
         if las and not flee:
             lrange = min(las.get("stats", {}).get("range", 280), 200)
-            for m in mechs:
+            for m in mechs[:4]:  # nearest few only: each line of fire costs time
                 a_l, d_l = self.direct_aim(me, m)
                 if d_l < lrange and self.in_view(me, m) and self.los_clear(me, m):
                     lt, aim_l, dl = m, a_l, d_l
@@ -483,14 +513,18 @@ class Bot:
                 self.full_t = t
         else:
             self.full_t = None
-        laser_aims = False
+        laser_aims = grace = False
+        overdue = self.full_t is not None and t - self.full_t > 0.5
         if lt is not None:
+            self.lt_t, self.lt_aim = t, aim_l
             laser_aims = charge > 0 or las.get("cooldown", 0) < 0.3
             tol = min(max(math.atan2(2.0, dl), 0.01), 0.05)
             on = abs(ang_diff(me["aim"][0], aim_l[0])) < tol and abs(me["aim"][1] - aim_l[1]) < 0.08
             # hold to charge; let go when full and on target, or after 0.5 s at full
-            overdue = self.full_t is not None and t - self.full_t > 0.5
             fire[las_i] = not (charge >= full - 0.01 and (on or overdue))
+        elif las and not flee and charge > 0 and self.lt_aim is not None and t - self.lt_t <= 0.5:
+            grace = True  # target just left view: keep the charge and the aim for a moment
+            fire[las_i] = not (charge >= full - 0.01 and overdue)
 
         if target is not None:
             gst = gun.get("stats", {}) if gun else {}
@@ -498,7 +532,8 @@ class Bot:
             err = abs(ang_diff(me["aim"][0], aim[0]))
             act["aim"] = aim_l if laser_aims else aim
             # shoot only what we could see now, through a clear line
-            if self.in_view(me, target) and self.los_clear(me, target):
+            seen = self.in_view(me, target) or t - self.dmg_t < 3  # a track that is hitting us counts as seen
+            if seen and self.los_clear(me, target):
                 # commit to a fight: we were hit, it is close, we hold a laser, or a visible mech is aiming at us
                 engaged = t - self.dmg_t < 3 or d < 120 or las is not None or any(
                     abs(ang_diff(m["aim"][0], math.atan2(y - m["pos"][1], x - m["pos"][0]))) < 0.12
@@ -520,6 +555,8 @@ class Bot:
                 act["aim"] = [math.atan2(my, mx), 0.0]
             else:
                 act["aim"] = [me["aim"][0] + 0.5, 0.0]  # idle: scan around
+        if grace:
+            act["aim"] = list(self.lt_aim)
         if gun and gun.get("reload", 0) == 0:
             ammo = gun.get("ammo", 99)
             if ammo == 0 or (ammo <= 4 and target is None):
