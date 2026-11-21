@@ -377,8 +377,8 @@ class Tracker:
 
 
 def _p1(offset, sigma, half):
-    """P(|offset + N(0, sigma^2)| < half)."""
-    if half <= 0.0:
+    """P(|offset + N(0, sigma^2)| < half). Non-finite input: 0."""
+    if not _fin(offset, sigma, half) or half <= 0.0:
         return 0.0
     if sigma < 1e-6:
         return 1.0 if offset <= half else 0.0
@@ -610,9 +610,16 @@ class TargetState:
     def __init__(self):
         self.current = None
         self.last_hit = {}
+        self.last_t = -1e9
 
     def feed(self, obs):
         t = obs.get("t", 0.0)
+        if not _fin(t):
+            return
+        if t < self.last_t - 1e-9:  # time went backwards: a new match
+            self.current = None
+            self.last_hit.clear()
+        self.last_t = t
         for ev in obs.get("events") or []:
             if ev.get("type") == "damaged" and ev.get("by") is not None:
                 self.last_hit[ev["by"]] = t
@@ -693,6 +700,18 @@ def needs_reload(weapon):
     return bool(weapon and weapon.get("kind") == "gun" and weapon.get("ammo", 1) == 0 and not weapon.get("reload"))
 
 
+def _laser_stat(weapon, cfg, key, default):
+    v = (weapon.get("stats") or {}).get(key, cfg.laser.get(key, default))
+    return float(v) if _fin(v) else default
+
+
+def _laser_held(weapon, cfg, held_full_s):
+    """Seconds a laser has sat at full charge: from the reported charge or the caller's timer."""
+    charge = weapon.get("charge") or 0.0
+    over = charge - _laser_stat(weapon, cfg, "charge", 0.75) if _fin(charge) else 0.0
+    return max(over, held_full_s if _fin(held_full_s) else 0.0)
+
+
 def fire_decision(me, target, weapon, sol, config=None, los_fn=None, hide=False, deadline=None, now=None,
                   held_full_s=0.0):
     """(fire, reason) for one weapon slot.
@@ -705,14 +724,22 @@ def fire_decision(me, target, weapon, sol, config=None, los_fn=None, hide=False,
     lightning: only when the target is the nearest thing in the cone, in range, energy > 20.
     hide (T4) and a passed deadline (T3) win over any good shot.
     """
-    if weapon is None or sol is None:
+    if weapon is None:
         return False, "empty"
     kind = weapon.get("kind")
-    if hide:
-        return False, "hide"
-    if deadline is not None and now is not None and now >= deadline:
-        return False, "deadline"
     cfg = Cfg(config, me)
+    stop = "hide" if hide else (
+        "deadline" if deadline is not None and now is not None and now >= deadline else None)
+    if kind == "laser" and (weapon.get("charge") or 0.0) > 0.0 and (stop or sol is None):
+        # releasing would fire the beam: keep holding until the hold limit
+        held = _laser_held(weapon, cfg, held_full_s)
+        if held >= _laser_stat(weapon, cfg, "hold_s", 2.0) - 0.15:
+            return False, "release_hold_limit"
+        return True, "hold_" + (stop or "no_target")
+    if stop:
+        return False, stop
+    if sol is None:
+        return False, "empty"
     muz = my_muzzle(me, cfg)
 
     def clear():
@@ -734,10 +761,9 @@ def fire_decision(me, target, weapon, sol, config=None, los_fn=None, hide=False,
             return False, "blocked"
         return True, "fire"
     if kind == "laser":
-        ls = (weapon.get("stats") or {})
-        full = ls.get("charge", cfg.laser.get("charge", 0.75))
-        minc = ls.get("min_charge", cfg.laser.get("min_charge", 0.15))
-        hold = ls.get("hold_s", cfg.laser.get("hold_s", 2.0))
+        full = _laser_stat(weapon, cfg, "charge", 0.75)
+        minc = _laser_stat(weapon, cfg, "min_charge", 0.15)
+        hold = _laser_stat(weapon, cfg, "hold_s", 2.0)
         charge = weapon.get("charge", 0.0) or 0.0
         if charge <= 0.0:
             if weapon.get("cooldown", 0.0) > 0.1:
@@ -749,8 +775,7 @@ def fire_decision(me, target, weapon, sol, config=None, los_fn=None, hide=False,
             return True, "charge"
         if charge < minc:
             return True, "charging"
-        held = max(charge - full, held_full_s if _fin(held_full_s) else 0.0)
-        if held >= hold - 0.15:
+        if _laser_held(weapon, cfg, held_full_s) >= hold - 0.15:
             return False, "release_hold_limit"
         if charge >= 0.9 * full and sol.hit_prob >= LASER_RELEASE_P and sol.inside and sol.in_range and clear():
             return False, "release"
@@ -897,9 +922,14 @@ def decide(obs, los=None, hide=False, deadline=None, include_npcs=False):
         # obs.mechs already carries memory_s of server-side tracking: no extra ghost targets here
         target = choose_target(obs, me, st_tg, None, include_npcs)
         if target is None:
-            last_plan = {"aim": None, "fire": [False, False], "reload": any(
-                needs_reload(w) for w in (me.get("weapons") or [])), "reasons": [None, None]}
-            return None, [False, False], None
+            fire, reasons = [False, False], [None, None]
+            for i, w in enumerate((me.get("weapons") or [])[:2]):
+                if isinstance(w, dict) and w.get("kind") == "laser" and (w.get("charge") or 0.0) > 0.0:
+                    fire[i], reasons[i] = fire_decision(me, None, w, None, cfg, None, hide, deadline,
+                                                        obs.get("t"), held[i])
+            last_plan = {"aim": None, "fire": fire, "reload": any(
+                needs_reload(w) for w in (me.get("weapons") or [])), "reasons": reasons}
+            return None, fire, None
         los_fn = los if los is not None else _state["los"]
         plan = plan_shots(obs, me, target, st_tr, cfg, los_fn, hide, deadline, held_full=held)
         last_plan = plan

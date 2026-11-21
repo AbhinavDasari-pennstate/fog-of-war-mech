@@ -563,6 +563,16 @@ class TestAimGeometry(unittest.TestCase):
                 hit += 1
         self.assertAlmostEqual(aim.rect_hit_prob(1.5, 3.0, 1.2, 2.5, 4.5), hit / n, delta=0.015)
 
+    def test_rect_hit_prob_non_finite_input_is_zero(self):
+        nan, inf = float("nan"), float("inf")
+        for args in ((nan, 0.0, 1.0, 2.0, 4.5), (0.0, nan, 1.0, 2.0, 4.5), (0.0, 0.0, nan, 2.0, 4.5),
+                     (0.0, 0.0, 1.0, nan, 4.5), (0.0, 0.0, 1.0, 2.0, inf), (inf, 0.0, 1.0, 2.0, 4.5),
+                     (0.0, 0.0, inf, 2.0, 4.5), (None, 0.0, 1.0, 2.0, 4.5)):
+            self.assertEqual(aim.rect_hit_prob(*args), 0.0, args)
+        for args in ((nan, 1.0, 2.0), (0.0, nan, 2.0), (0.0, 1.0, nan), (inf, 1.0, 2.0), (0.0, inf, 2.0),
+                     (0.0, 1.0, inf), (None, 1.0, 2.0)):
+            self.assertEqual(aim._p1(*args), 0.0, args)
+
     def test_vertical_offset_inside_the_silhouette_still_hits(self):
         # level aim from the 7 m muzzle at a 9 m tall mech 100 m away crosses it 2.5 m above centre mass
         for b in BEARINGS:
@@ -606,6 +616,20 @@ class TestChooseTarget(unittest.TestCase):
         st2 = aim.TargetState()
         st2.last_hit[1] = 5.0
         self.assertEqual(aim.choose_target(make_obs(me, [a, b], t=7.9), me, st2)["id"], 1)
+
+    def test_target_state_clears_when_time_goes_backwards(self):
+        me = make_me()
+        st = aim.TargetState()
+        a = make_target(tid=4, pos=(60.0, 0.0, 0.0))
+        b = make_target(tid=5, pos=(60.0, 5.0, 0.0))
+        aim.choose_target(make_obs(me, [a, b], t=50.0, events=[{"type": "damaged", "amount": 45, "by": 5}]), me, st)
+        self.assertIn(5, st.last_hit)
+        self.assertEqual(st.current, 5)
+        aim.choose_target(make_obs(me, [a], t=1.0), me, st)     # a new match: t restarts
+        self.assertNotIn(5, st.last_hit)
+        got = aim.choose_target(make_obs(me, [a, b], t=1.1), me, st)
+        self.assertEqual(st.last_hit, {})
+        self.assertIsNotNone(got)
 
     def test_sticky_target_no_thrash(self):
         me = make_me()
@@ -788,6 +812,33 @@ class TestFireGate(unittest.TestCase):
         _, f, _ = aim.decide(make_obs(me, [tgt], t=7.1), lambda a, b: True)
         self.assertTrue(f[1])
         self.assertEqual(aim.last_plan["reasons"][1], "charging")
+
+    def test_charging_laser_keeps_holding_under_hide_deadline_and_no_target(self):
+        tgt = make_target(pos=(100.0, 0.0, 0.0))
+        cases = (("hide", dict(hide=True), [tgt], 1.0), ("deadline", dict(deadline=0.5), [tgt], 1.0),
+                 ("no target", {}, [], 1.0))
+        for name, kw, mechs, t0 in cases:
+            with self.subTest(case=name):
+                aim.init({"config": CONFIG})
+                me = make_me(aim_=(0.2, 0.0), weapons=[make_me()["weapons"][0], laser_weapon(charge=0.5)])
+                _, f, _ = aim.decide(make_obs(me, mechs, t=t0), lambda a, b: True, **kw)
+                self.assertEqual(f, [False, True])            # gun quiet, laser held (no release)
+                # held at full charge: the hold-limit logic still lets go before the auto-fire
+                rel = None
+                for i in range(1, 40):
+                    me = make_me(aim_=(0.2, 0.0), weapons=[make_me()["weapons"][0], laser_weapon(charge=0.75)])
+                    _, f, _ = aim.decide(make_obs(me, mechs, t=t0 + 0.1 * i), lambda a, b: True, **kw)
+                    self.assertFalse(f[0])
+                    if not f[1]:
+                        rel = t0 + 0.1 * i
+                        break
+                self.assertIsNotNone(rel)
+                self.assertEqual(aim.last_plan["reasons"][1], "release_hold_limit")
+                # not charging: hide / deadline / no target never start a charge
+                me = make_me(aim_=(0.0, 0.0), weapons=[None, laser_weapon(charge=0.0)])
+                _, f, _ = aim.decide(make_obs(me, mechs, t=10.0), lambda a, b: True, **kw)
+                self.assertEqual(f, [False, False])
+        aim.init(None)
 
     def test_laser_blocked_never_starts_and_never_releases_on_a_hit_claim(self):
         tgt = make_target(pos=(100.0, 0.0, 0.0))
@@ -1134,6 +1185,8 @@ class TestWithRealLineOfFire(unittest.TestCase):
 
     def test_decide_with_the_real_map_los(self):
         import ray
+        if _REAL_MAP is None:
+            self.skipTest("kit map not found")
         ray.init()
         aim.init({"config": CONFIG})
         me = make_me(pos=(0.0, 0.0, 40.0), aim_=(0.0, 0.0))
