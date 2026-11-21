@@ -43,7 +43,7 @@ DETOUR_SAME_M, DETOUR_SAME_S = 10.0, 20.0  # stuck again this close to the last 
 DETOUR_ANGLES = (1.2, 1.6, 2.0, 2.4)  # detour heading off the goal (rad), wider each time the same obstacle holds us
 RETREAT_HP, RETURN_HP = 0.30, 0.80  # under RETREAT_HP go to cover; hold fire there until RETURN_HP (regen: 5 s calm)
 COVER_RINGS, COVER_DIRS = (5, 10, 15, 20, 25, 30), 8  # cover search: rings (m) x directions, nearest first
-THREAT_M, CORNER_M = 200.0, 20.0  # mechs this close count for cover; one this close: fight back, no hiding
+THREAT_M = 200.0  # mechs this close count for cover
 COVER_RECHECK_S = 0.5  # reuse a found spot (or a miss) this long; a found spot is re-tested every decision
 SIZE_PER_CUBE = 0.05  # protocol: each cube scales height, eye and muzzle by 1 + 0.05 x cubes (no cap)
 COVER_BUDGET_MS = 8.0  # a search stops here (the real map, no cover in reach, costs up to about 35 ms)
@@ -714,8 +714,7 @@ class Bot:
             self.retreating, self.cover = False, None  # urgent (outside or near the zone edge) beats hiding
         elif hp_frac < RETREAT_HP:
             self.retreating = True
-        cornered = any(math.dist(m["pos"][:2], (x, y)) < CORNER_M for m in threats)
-        if self.retreating and not cornered:
+        if self.retreating:
             spot = self.cover_spot(t, x, y, z, threats, ccx, ccy, cr, me.get("cubes") or 0)
             if spot == (x, y):
                 mx = my = 0.0

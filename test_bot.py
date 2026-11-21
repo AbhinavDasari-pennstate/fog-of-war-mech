@@ -1057,10 +1057,7 @@ class TestLineOfFire(Base):
         self.assertIsNotNone(self.bot_with(self.BUILDING).cover_spot(0.0, 30, 40, 0.0, threat, 0, 0, 1e9))
         self.assertIsNone(self.bot_with(self.BUILDING).cover_spot(0.0, 30, 40, 0.0, threat, 30, 40, 28))
 
-    def test_no_hiding_when_cornered_or_outside_the_zone(self):
-        bot = self.bot_with(self.BUILDING)
-        bot.act(self.retreat_obs((30, 40, 0), 300, enemy=(30, 55, 0)))  # 15 m away: fight back
-        self.assertIsNone(bot.cover)
+    def test_no_hiding_outside_the_zone(self):
         bot = self.bot_with(self.BUILDING)
         bot.act(self.retreat_obs((30, 40, 0), 300, in_zone=False))
         self.assertFalse(bot.retreating)
