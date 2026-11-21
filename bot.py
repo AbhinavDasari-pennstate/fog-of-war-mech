@@ -38,8 +38,10 @@ UPGRADE_PRIO = ["plating", "laser_damage", "gun_mag", "armor", "nanites", "light
                 "gun_velocity", "lightning_range", "lightning_chain", "laser_pierce"]
 GRAB_KINDS = ("laser", "lightning")  # preference order; mortar is never picked up
 FREE_N = 20  # decisions of free movement that end a detour early
+DETOUR_SAME_M, DETOUR_SAME_S = 10.0, 20.0  # stuck again this close to the last detour's start this soon: same obstacle
+DETOUR_ANGLES = (1.2, 1.6, 2.0, 2.4)  # detour heading off the goal (rad), wider each time the same obstacle holds us
 ENGAGE_S = 5.0  # a mech that hit us or that we hit stays a target this long (protocol memory_s)
-STATE = ("stuck", "detour", "detour_sign", "detour_end", "free_n", "edge_sign", "edge_until", "dodge_sign",
+STATE = ("stuck", "detour", "detour_sign", "detour_end", "free_n", "detour_at", "detour_lvl", "edge_sign", "edge_until", "dodge_sign",
          "dodge_t", "dodge_flip_t", "full_t", "lt_t", "lt_aim", "threat_yaw", "threat_t", "dmg_t")
 SOUND_KINDS = ("gun", "laser", "laser_charge", "lightning", "mortar")
 
@@ -122,6 +124,8 @@ class Bot:
         self.detour_sign = 1
         self.detour_end = -99.0
         self.free_n = 0
+        self.detour_at = None   # (x, y, t) where the last detour started
+        self.detour_lvl = 0     # index into DETOUR_ANGLES
         self.threat_yaw = None  # bearing of the last hit (or weapon sound when not hit)
         self.threat_t = -99.0
         self.dmg_t = -99.0      # last weapon damage taken
@@ -783,7 +787,11 @@ class Bot:
         if me["grounded"]:  # airborne (our own stuck jump) keeps the count, so a failed jump leads to the detour
             self.stuck = self.stuck + 1 if want and speed < 2.0 else 0
         if self.stuck >= 4 and self.detour == 0 and me["grounded"]:  # start only on the ground: a mid-air restart jets the bar empty
-            if t - self.detour_end < 4.0:  # the last detour did not get us round: try the other side
+            last = self.detour_at
+            same = last is not None and math.hypot(x - last[0], y - last[1]) < DETOUR_SAME_M and t - last[2] < DETOUR_SAME_S
+            self.detour_lvl = min(self.detour_lvl + 1, len(DETOUR_ANGLES) - 1) if same else 0
+            self.detour_at = (x, y, t)
+            if same or t - self.detour_end < 4.0:  # the last detour did not get us round: try the other side
                 self.detour_sign = -self.detour_sign
             else:  # a new obstacle: go round on the side with more room
                 heading = math.atan2(my, mx)
@@ -796,13 +804,13 @@ class Bot:
             self.detour = self.free_n = 0
         if self.detour > 0:
             self.free_n = self.free_n + 1 if speed > 5.0 else 0
-            if self.free_n >= FREE_N:  # moving freely: assume we are round it, head for the goal again (same side next time)
+            if self.free_n >= FREE_N and self.detour_lvl == 0:  # moving freely (first try at this obstacle): assume we are round it, head for the goal again (same side next time)
                 self.detour, self.free_n = 0, 0
             else:
                 self.detour -= 1
                 if self.detour == 0:
                     self.detour_end = t
-                a = math.atan2(my, mx) + self.detour_sign * 1.2
+                a = math.atan2(my, mx) + self.detour_sign * DETOUR_ANGLES[self.detour_lvl]
                 mx, my = math.cos(a), math.sin(a)
         jump = self.stuck >= 3 and me["energy"] > 30
         jet = (not me["grounded"]) and me["vel"][2] < 4 and want and self.detour > 0

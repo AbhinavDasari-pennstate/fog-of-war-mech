@@ -1699,19 +1699,49 @@ class TestAimWiring(Base):
 class TestDetour(Base):
     def test_detour_keeps_one_side_for_the_whole_obstacle_then_flips_when_it_fails(self):
         bot = Bot(HELLO)
-        signs = []
+        signs, wides = [], []
         for i in range(60):
             obs = make_obs(tick=i, t=3 + i / 10, pickups=[pickup(1, "laser", (60, 0, 0))],
                            zone={"next_center": [-300, 0]})
             a = bot.act(obs)
             self.assertEqual(problems(obs, a), [])
             h = math.atan2(a["move"][1], a["move"][0])
-            signs.append(0 if abs(abs(h) - 1.2) > 1e-6 else (1 if h > 0 else -1))
+            signs.append(0 if all(abs(abs(h) - x) > 1e-6 for x in botmod.DETOUR_ANGLES) else (1 if h > 0 else -1))
+            wides.append(abs(h))
         first = signs[3:28]
         self.assertNotIn(0, first)
         self.assertEqual(len(set(first)), 1)             # one side for the whole 2.5 s detour
+        self.assertAlmostEqual(wides[3], botmod.DETOUR_ANGLES[0])
         second = signs[28:53]
-        self.assertEqual(set(second), {-first[0]})       # still stuck afterwards: other side
+        self.assertEqual(set(second), {-first[0]})       # still stuck afterwards: other side...
+        self.assertAlmostEqual(wides[30], botmod.DETOUR_ANGLES[1])  # ...and wider: same obstacle
+
+    def test_a_detour_that_runs_free_then_hits_the_same_wall_widens_and_runs_full(self):
+        """Seed 625440276: each detour ran free for 2 s (early exit), turned back to the goal and hit the same
+        wall: 75 s stuck. Stuck again near the last detour's start: other side, wider, no early exit."""
+        bot = Bot(HELLO)
+        pk = [pickup(1, "laser", (60, 0, 0))]
+        tick = 0
+
+        def step(vel):
+            nonlocal tick
+            tick += 1
+            return bot.act(make_obs(tick=tick, t=3 + tick / 10, pickups=pk, vel=vel))
+        for _ in range(4):
+            step((0, 0, 0))
+        self.assertEqual((bot.detour > 0, bot.detour_lvl), (True, 0))
+        sign0 = bot.detour_sign
+        for _ in range(botmod.FREE_N):
+            step((8, 0, 0))  # runs free: the first detour ends early
+        self.assertEqual(bot.detour, 0)
+        for _ in range(4):
+            step((0, 0, 0))  # same spot (obs pos stays 0, 0): stuck again
+        self.assertEqual(bot.detour_lvl, 1)
+        self.assertEqual(bot.detour_sign, -sign0)
+        for _ in range(botmod.FREE_N + 2):
+            a = step((8, 0, 0))
+        self.assertGreater(bot.detour, 0)  # no early exit this time
+        self.assertAlmostEqual(abs(math.atan2(a["move"][1], a["move"][0])), botmod.DETOUR_ANGLES[1])
 
     def test_detour_prefers_the_side_with_room(self):
         d = tempfile.mkdtemp()
