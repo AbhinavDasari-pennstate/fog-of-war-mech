@@ -72,7 +72,8 @@ class Bot:
         # ---- where to stand: deep inside the circle the zone is closing to ----
         zone = obs["zone"]
         cx, cy = zone["next_center"]
-        safe_r = max(zone["next_radius"] * 0.55, 6.0)
+        # v2: stay on the quiet outer part of the next circle, not the crowded center
+        safe_r = max(zone["next_radius"] * 0.8 - 15, 6.0)
         dz = math.hypot(cx - x, cy - y)
         s0, s1 = zone["shrink_start"], zone["shrink_end"]
         f = min(max((t - s0) / (s1 - s0), 0.0), 1.0) if s1 > s0 else 0.0
@@ -131,7 +132,10 @@ class Bot:
         if n > 1:
             mx, my, n = mx / n, my / n, 1.0
         # walk under 5 m/s when there is no hurry: no step sounds
-        hurry = urgent or flee or mechs or self.detour or dz > safe_r + 40
+        # only hurry when the zone is about to reach us (time to shrink_end vs walk time) or in danger
+        time_left = max(zone["shrink_end"] - t, 0.0)
+        walk_t = (dz - safe_r) / 4.5
+        hurry = urgent or flee or bool(mechs) or self.detour or walk_t > time_left * 0.7
         if not hurry and n > 0:
             k = 4.5 / me["stats"].get("walk_speed", 11.7)
             mx, my = mx * k, my * k
@@ -167,8 +171,11 @@ class Bot:
             if gun and gun["ammo"] == 0 and gun["reload"] == 0:
                 act["reload"] = True
         else:
+            loud = [s for s in obs["sounds"] if s["kind"] not in ("crate", "drop", "death") and s["dist"] != "far"]
+            if loud:
+                self.threat_yaw, self.threat_t = loud[0]["bearing"], max(self.threat_t, t - 2)
             if self.threat_yaw is not None and t - self.threat_t < 4:
-                act["aim"] = [self.threat_yaw, 0.0]   # face the attacker: rear hits do x1.5
+                act["aim"] = [self.threat_yaw, 0.0]   # face the attacker or the noise: rear hits do x1.5
             elif n > 0:
                 act["aim"] = [math.atan2(my, mx), 0.0]
             else:
