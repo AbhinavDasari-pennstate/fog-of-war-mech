@@ -297,8 +297,8 @@ class Bot:
             if not w or not raw[i]:
                 continue
             kind = w.get("kind")
-            if kind == "gun":
-                fire[i] = seen and engaged
+            if kind == "gun":  # any seen mech (aim.py gated line, range, p >= 0.35); drones, lite pass, flee: engaged
+                fire[i] = seen and (engaged or (target.get("kind") == "mech" and not self.lite and not flee))
             elif kind == "lightning":
                 fire[i] = seen
             elif kind == "laser":
@@ -360,7 +360,9 @@ class Bot:
                     abs(ang_diff(m["aim"][0], math.atan2(y - m["pos"][1], x - m["pos"][0]))) < 0.12
                     for m in mechs if m.get("aim"))
                 tol = min(0.06, max(math.atan2(2.0, d), 0.008))  # inside the target's angular size
-                if gun and engaged and d < gst.get("range", 230) and err < tol and gun.get("ammo", 1) > 0:
+                # any seen mech; drones, the lite pass (no line test) and fleeing: only when engaged
+                shoot = engaged or (target.get("kind") == "mech" and not self.lite and not flee)
+                if gun and shoot and d < gst.get("range", 230) and err < tol and gun.get("ammo", 1) > 0:
                     fire[gun_i] = True
                 if light and d < light.get("stats", {}).get("range", 45) and err < 0.4 and me["energy"] > 10:
                     fire[light_i] = True

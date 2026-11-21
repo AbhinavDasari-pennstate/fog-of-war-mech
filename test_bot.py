@@ -427,8 +427,29 @@ class TestEngagement(Base):
         obs["self"]["aim"] = aim
         return obs
 
-    def test_gun_holds_fire_at_long_range_when_not_hit(self):
-        self.assertFalse(self.act(self.on_target((150, 0, 0)))["fire"][0])
+    def test_gun_fires_at_long_range_unprovoked(self):
+        # the provoked-only gate (hit lately, near, laser held, or aimed at) is gone for mechs
+        self.assertTrue(self.act(self.on_target((150, 0, 0)))["fire"][0])
+
+    def test_v3_fallback_gun_fires_unprovoked_too(self):
+        self.bot.aim_ok = False
+        self.assertTrue(self.act(self.on_target((150, 0, 0)))["fire"][0])
+
+    def test_unprovoked_gun_is_off_on_the_lite_pass_and_when_fleeing(self):
+        obs = self.on_target((150, 0, 0))
+        self.bot.lite = True
+        self.assertFalse(self.bot._decide(obs)["fire"][0])  # no line test there: keep the old gate
+        self.bot = Bot(HELLO)
+        self.bot.fight = None  # v3 flee
+        self.assertFalse(self.act(self.on_target((150, 0, 0), hp=400))["fire"][0])
+
+    def test_gun_still_needs_the_mech_in_view(self):
+        obs = self.on_target((-150, 0, 0))  # behind us: a memory track, not seen, not hitting us
+        obs["self"]["aim"] = [0.0, 0.0]
+        self.assertFalse(self.act(obs)["fire"][0])
+        self.bot = Bot(HELLO)
+        self.bot.aim_ok = False
+        self.assertFalse(self.act(obs)["fire"][0])
 
     def test_gun_fires_at_close_range(self):
         self.assertTrue(self.act(self.on_target((100, 0, 0)))["fire"][0])
@@ -436,13 +457,13 @@ class TestEngagement(Base):
     def test_gun_fires_at_long_range_after_taking_damage(self):
         ev = [{"type": "damaged", "amount": 45, "weapon": "gun", "bearing": 0.0, "by": 5}]
         self.assertTrue(self.act(self.on_target((150, 0, 0), events=ev))["fire"][0])
-        # still counts 2 s later, expires after 3 s
+        # and keeps firing after the hit window, now that a seen mech needs no provocation
         self.assertTrue(self.act(self.on_target((150, 0, 0), t=32, tick=2))["fire"][0])
-        self.assertFalse(self.act(self.on_target((150, 0, 0), t=34, tick=3))["fire"][0])
+        self.assertTrue(self.act(self.on_target((150, 0, 0), t=34, tick=3))["fire"][0])
 
-    def test_zone_damage_does_not_count_as_a_fight(self):
+    def test_zone_damage_does_not_stop_the_gun(self):
         ev = [{"type": "damaged", "amount": 20, "weapon": "zone", "bearing": None, "by": None}]
-        self.assertFalse(self.act(self.on_target((150, 0, 0), events=ev))["fire"][0])
+        self.assertTrue(self.act(self.on_target((150, 0, 0), events=ev))["fire"][0])
 
     def test_lone_attacker_at_full_hp_is_fought_not_fled(self):
         # one visible enemy, full health, no zone pull: stand and shoot, laser charges too
@@ -464,8 +485,8 @@ class TestEngagement(Base):
         obs = make_obs(mechs=[e])
         obs["self"]["aim"], _ = self.bot.lead_aim(obs["self"], e, 252)
         self.assertTrue(self.act(obs)["fire"][0])
-        e["aim"] = [math.pi - 0.5, 0.0]  # looking elsewhere
-        self.assertFalse(self.act(obs)["fire"][0])
+        e["aim"] = [math.pi - 0.5, 0.0]  # looking elsewhere: still a seen mech, still shot
+        self.assertTrue(self.act(obs)["fire"][0])
 
     def test_gun_fires_at_long_range_when_holding_a_laser(self):
         obs = self.on_target((150, 0, 0), weapons=[gun(), laser(cooldown=1.0)])
@@ -1415,11 +1436,11 @@ class TestAimWiring(Base):
         a = self.act(make_obs(tick=2, aim=on, weapons=[gun(), laser(charge=0.75)], mechs=[e]))
         self.assertFalse(a["fire"][1])  # full and on target: released
 
-    def test_engagement_gate_keeps_the_gun_quiet_until_provoked(self):
-        e = mech(5, (150, 0, 0))
+    def test_gun_fires_at_a_seen_mech_without_being_provoked(self):
+        e = mech(5, (150, 0, 0))  # far, not aiming at us, no hit, no laser held: the old gate kept the gun quiet
         obs = make_obs(mechs=[e])
         obs["self"]["aim"], _ = self.bot.lead_aim(obs["self"], e, 252)
-        self.assertFalse(self.act(obs)["fire"][0])
+        self.assertTrue(self.act(obs)["fire"][0])
         hit = make_obs(tick=2, mechs=[e], events=self.HIT)
         hit["self"]["aim"] = obs["self"]["aim"]
         self.assertTrue(self.act(hit)["fire"][0])
