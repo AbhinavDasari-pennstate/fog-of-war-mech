@@ -860,6 +860,15 @@ class TestLineOfFire(Base):
         self.assertFalse(self.shoot(self.bot_with(self.BUILDING), (215, 0, 0))["fire"][0])
         self.assertTrue(self.shoot(self.bot_with(), (215, 0, 0))["fire"][0])
 
+    def test_prism_sampling_still_guards_the_line_when_ray_is_missing(self):
+        import unittest.mock as um
+        bot = self.bot_with(self.BUILDING)
+        bot.aim_ok = False
+        with um.patch.object(botmod, "raylib", None), um.patch.object(botmod, "aimlib", None):
+            self.assertFalse(self.shoot(bot, (100, 0, 0))["fire"][0])
+            self.assertTrue(self.shoot(bot, (100, 60, 0))["fire"][0])
+            self.assertTrue(self.shoot(bot, (30, 0, 0))["fire"][0])
+
     def test_unreadable_map_means_no_line_of_fire_check(self):
         import unittest.mock as um
         hello = copy.deepcopy(HELLO)
@@ -1272,6 +1281,55 @@ class TestAimWiring(Base):
         a = self.act(make_obs(tick=2, weapons=[gun(ammo=3), None]))
         self.assertTrue(a.get("reload"))  # quiet moment, low magazine
 
+    def test_a_wounded_remembered_mech_does_not_pull_the_aim_off_a_visible_one(self):
+        near = mech(5, (100, 0, 0))
+        far = mech(6, (-200, 0, 0))
+        far["hp"] = 100  # wounded, but behind us and only remembered
+        obs = make_obs(mechs=[near, far])
+        obs["self"]["aim"], _ = self.bot.lead_aim(obs["self"], near, 252)
+        for i in range(5):
+            a = self.act(dict(obs, tick=i + 1, t=30 + i / 10))
+            self.assertLess(abs(a["aim"][0]), 0.05)  # still on the mech in front of us
+            self.assertTrue(a["fire"][0])
+
+    def test_a_wounded_far_mech_does_not_silence_the_gun_while_a_close_one_is_in_view(self):
+        near = mech(5, (100, 0, 0))
+        far = mech(6, (200, 15, 0))
+        far["hp"] = 100
+        obs = make_obs(mechs=[near, far])
+        shots = 0
+        for i in range(10):
+            a = self.act(dict(obs, tick=i + 1, t=30 + i / 10))
+            obs["self"]["aim"] = list(a["aim"])  # the torso follows the command
+            shots += bool(a["fire"][0])
+        self.assertGreaterEqual(shots, 5)
+
+    def test_engaged_comes_from_every_seen_mech_not_only_the_chosen_target(self):
+        near = mech(5, (100, 0, 0))   # inside 120 m: we are in a fight
+        far = mech(6, (190, 15, 0))   # the aim module prefers this one (wounded), at 190 m and in view
+        far["hp"] = 100
+        obs = make_obs(mechs=[near, far])
+        a = self.act(obs)
+        self.assertLess(abs(a["aim"][0] - math.atan2(15, 190)), 0.03)  # it did pick the far one
+        obs["self"]["aim"] = list(a["aim"])
+        self.assertTrue(self.act(dict(obs, tick=2))["fire"][0])
+
+    def test_only_drones_within_60_m_after_a_hit_are_targets(self):
+        idle = mech(104, (80, 0, 0), kind="npc")
+        hitter = mech(105, (0, 55, 0), kind="npc")
+        ev = [{"type": "damaged", "amount": 25, "weapon": "npc", "bearing": 1.57, "by": 7}]
+        a = self.act(make_obs(mechs=[idle, hitter], events=ev))
+        self.assertAlmostEqual(a["aim"][0], math.pi / 2, places=1)  # the near drone, not the idle one
+
+    def test_a_hit_by_someone_else_does_not_make_an_unseen_track_shootable(self):
+        e = mech(5, (215, 0, 0))
+        obs = make_obs(mechs=[e], events=[{"type": "damaged", "amount": 45, "weapon": "gun", "bearing": 2.0, "by": 9}])
+        obs["self"]["aim"], _ = self.bot.lead_aim(obs["self"], e, 252)
+        self.assertFalse(self.act(obs)["fire"][0])
+        unknown = [{"type": "damaged", "amount": 45, "weapon": "gun", "bearing": 0.0, "by": None}]
+        obs2 = dict(obs, tick=2, events=unknown)
+        self.assertTrue(self.act(obs2)["fire"][0])  # source unknown: any track may be the attacker
+
     def test_aim_failure_falls_back_to_v3_logic(self):
         import unittest.mock as um
         e = mech(5, (100, 0, 0))
@@ -1507,7 +1565,12 @@ class TestWrapper(unittest.TestCase):
 class TestMainEntrypoint(unittest.TestCase):
     def test_dockerfile_runs_bot_py_as_main(self):
         with open(os.path.join(HERE, "Dockerfile")) as f:
-            self.assertIn('ENTRYPOINT ["python3", "-u", "/bot/bot.py"]', f.read())
+            text = f.read()
+        self.assertIn('ENTRYPOINT ["python3", "-u", "/bot/bot.py"]', text)
+        copy_lines = [l for l in text.splitlines() if l.startswith("COPY ")]
+        self.assertEqual(len(copy_lines), 1)
+        for name in ("mechfight.py", "bot.py", "aim.py", "ray.py"):
+            self.assertIn(name, copy_lines[0].split())
         with open(os.path.join(HERE, "bot.py")) as f:
             self.assertIn('if __name__ == "__main__":', f.read())
 

@@ -92,6 +92,7 @@ class Bot:
             pass
         mf.log(f"map: prisms={len(self.prisms)} dir={hello.get('map', {}).get('dir')} ray={ray_n}")
         self.aim_errors = 0
+        self.hit_by = {}        # attacker id (None: unknown) -> time of its last hit on us
         self.stuck = 0          # decisions in a row we wanted to move but barely did
         self.detour = 0         # decisions left on a sideways detour
         self.detour_sign = 1
@@ -168,26 +169,58 @@ class Bot:
 
     def _los_raw(self, me, tgt):
         """False when a building, stadium, bridge or the ground is in the way (the shared exact ray test)."""
-        if raylib is None or self.lite:
+        if self.lite:
             return True
         x, y, z = me["pos"]
         mz = z + me["stats"].get("muzzle_height", 7)
         tx, ty, tz = tgt["pos"]
         tz += 4.5 if tgt["kind"] == "mech" else 1.75
+        if raylib is None:
+            return self._los_prisms(x, y, mz, tx, ty, tz)
         try:
             return bool(raylib.clear((x, y, mz), (tx, ty, tz)))
         except Exception:
             return True
 
-    def _aim_plan(self, obs, hitters):
-        """aim.decide for this observation, or None when it is unavailable or failed (v3 logic then runs)."""
+    def _los_prisms(self, x, y, mz, tx, ty, tz):
+        """Fallback when ray.py is missing: sample the segment every 2 m against the loaded prisms."""
+        if not self.prisms:
+            return True
+        lox, hix, loy, hiy = min(x, tx), max(x, tx), min(y, ty), max(y, ty)
+        loz, hiz = min(mz, tz), max(mz, tz)
+        cand = [p for p in self.prisms if p[0] <= hix and p[2] >= lox and p[1] <= hiy and p[3] >= loy
+                and p[5] >= loz and p[4] <= hiz]
+        n = max(2, min(int(math.hypot(tx - x, ty - y) / 2.0), 120))
+        for i in range(1, n):
+            f = i / n
+            px, py, pz = x + (tx - x) * f, y + (ty - y) * f, mz + (tz - mz) * f
+            for p in cand:
+                if (p[4] <= pz <= p[5] and p[0] <= px <= p[2] and p[1] <= py <= p[3]
+                        and inside(px, py, p[6]) and not any(inside(px, py, h) for h in p[7])):
+                    return False
+        return True
+
+    def _seen(self, me, m, t):
+        """A mech v3 may shoot at: in view now, or it (or an unknown attacker) hit us in the last 3 s."""
+        return (self.in_view(me, m) or t - self.hit_by.get(m.get("id"), -99.0) < 3
+                or t - self.hit_by.get(None, -99.0) < 3)
+
+    def _aim_plan(self, obs, hitters, seen_mechs=None, mechs=None):
+        """aim.decide for this observation, or None when it is unavailable or failed (v3 logic then runs).
+
+        The aim module scores targets (wounded, near, threatening) without knowing what v3 may shoot, so it
+        only gets the mechs in view or hitting us; when none qualifies it gets all of them (it still turns
+        to look, and the gate keeps the guns quiet). Drones are targets only when they hit us."""
         if self.lite or not self.aim_ok:
             return None
         try:
-            use, npcs_ok = obs, False
-            if hitters:  # only drones that hit us in the last 2 s are targets
-                use = dict(obs, mechs=[m for m in obs["mechs"] if m.get("kind") == "mech" or m in hitters])
-                npcs_ok = True
+            if mechs is None:
+                mechs = [m for m in obs["mechs"] if m.get("kind") == "mech"]
+            keep = {id(m) for m in (seen_mechs or mechs)}
+            drones = {id(m) for m in hitters}
+            use = dict(obs, mechs=[m for m in obs["mechs"] if (
+                id(m) in keep if m.get("kind") == "mech" else (not hitters or id(m) in drones))])
+            npcs_ok = bool(hitters)
             a, f, tg = aimlib.decide(use, los=raylib.clear, hide=False, deadline=None, include_npcs=npcs_ok)
             plan = aimlib.last_plan
             if "error" in plan:
@@ -211,11 +244,13 @@ class Bot:
         x, y, z = me["pos"]
         d = math.dist(target["pos"][:3], (x, y, z))
         in_view = self.in_view(me, target)
-        seen = in_view or t - self.dmg_t < 3  # a track that is hitting us counts as seen
+        seen = self._seen(me, target, t) if target.get("kind") == "mech" else in_view or t - self.dmg_t < 3
         laser_held = any(w and w.get("kind") == "laser" for w in ws)
-        engaged = t - self.dmg_t < 3 or d < 120 or laser_held or any(
-            abs(ang_diff(m["aim"][0], math.atan2(y - m["pos"][1], x - m["pos"][0]))) < 0.12
-            for m in mechs if m.get("aim"))
+        # in a fight when hit lately, holding a laser, or any seen mech is close or aiming at us
+        engaged = t - self.dmg_t < 3 or laser_held or d < 120 or any(
+            math.dist(m["pos"][:3], (x, y, z)) < 120
+            or (m.get("aim") and abs(ang_diff(m["aim"][0], math.atan2(y - m["pos"][1], x - m["pos"][0]))) < 0.12)
+            for m in mechs)
         for i, w in enumerate(ws):
             if not w or not raw[i]:
                 continue
@@ -364,7 +399,7 @@ class Bot:
         """One failing part must not cost the whole decision: retry without the map extras, then stand safe."""
         self.lite = False
         snap = {k: getattr(self, k) for k in STATE}
-        sets = (set(self.skip), dict(self.fails), dict(self.chase))
+        sets = (set(self.skip), dict(self.fails), dict(self.chase), dict(self.hit_by))
         try:
             return self._decide(obs)
         except Exception:
@@ -373,7 +408,7 @@ class Bot:
                 mf.log(f"decision degraded at tick {obs.get('tick')}: {traceback.format_exc()}")
         for k, v in snap.items():  # the failed pass must not leave its counters behind
             setattr(self, k, v)
-        self.skip, self.fails, self.chase = sets
+        self.skip, self.fails, self.chase, self.hit_by = sets
         self.lite = True
         try:
             return self._decide(obs)
@@ -409,6 +444,7 @@ class Bot:
             kind = ev.get("type")
             if kind == "damaged" and ev.get("weapon") != "zone":
                 self.dmg_t = t
+                self.hit_by[ev.get("by")] = t
                 if ev.get("bearing") is not None:
                     self.threat_yaw, self.threat_t = ev["bearing"], t
             elif kind == "take_failed":
@@ -629,10 +665,11 @@ class Bot:
         fire = [False, False]
         aim_cmd = None
         reload_cmd = False
-        plan = self._aim_plan(obs, hitters)
+        seen_mechs = [m for m in mechs if self._seen(me, m, t)]
+        plan = self._aim_plan(obs, hitters, seen_mechs, mechs)
         if plan is not None:
             target = plan["target"]
-            fire = self._gate_fire(plan["fire"], target, me, ws, mechs, flee, t)
+            fire = self._gate_fire(plan["fire"], target, me, ws, seen_mechs, flee, t)
             aim_cmd = plan["aim"]
             reload_cmd = plan["reload"]
             if las is not None:
