@@ -45,6 +45,7 @@ RETREAT_HP, RETURN_HP = 0.30, 0.80  # under RETREAT_HP go to cover; hold fire th
 COVER_RINGS, COVER_DIRS = (5, 10, 15, 20, 25, 30), 8  # cover search: rings (m) x directions, nearest first
 THREAT_M, CORNER_M = 200.0, 20.0  # mechs this close count for cover; one this close: fight back, no hiding
 COVER_RECHECK_S = 0.5  # reuse a found spot (or a miss) this long; a found spot is re-tested every decision
+SIZE_PER_CUBE = 0.05  # protocol: each cube scales height, eye and muzzle by 1 + 0.05 x cubes (no cap)
 COVER_BUDGET_MS = 8.0  # a search stops here (the real map, no cover in reach, costs up to about 35 ms)
 ENGAGE_S = 5.0  # a mech that hit us or that we hit stays a target this long (protocol memory_s)
 STATE = ("stuck", "detour", "detour_sign", "detour_end", "free_n", "detour_at", "detour_lvl", "edge_sign", "edge_until", "dodge_sign",
@@ -444,14 +445,16 @@ class Bot:
         self.chase.setdefault(best["id"], t)  # first time we went for it; kept if it leaves view
         return best
 
-    def cover_spot(self, t, x, y, z, threats, ccx, ccy, cr):
+    def cover_spot(self, t, x, y, z, threats, ccx, ccy, cr, cubes=0):
         """(x, y) if no threat sees us here, else the nearest spot within COVER_RINGS that none can see, that we can
         walk straight to on about our level and that is inside the zone's cr - 25 line, else None. A found spot is
         kept COVER_RECHECK_S while it stays hidden."""
-        def hidden(px, py, gz=None):  # no threat eye sees our centre or top, no muzzle has a line to our upper body
+        s = 1.0 + SIZE_PER_CUBE * cubes  # our size: centre 4.5 x s, top 9 x s
+
+        def hidden(px, py, gz=None):  # no threat eye sees our centre or our top (the protocol's two sight lines)
             gz = raylib.ground(px, py) if gz is None else gz
-            return all(not raylib.clear((m["pos"][0], m["pos"][1], m["pos"][2] + h0), (px, py, gz + h1))
-                       for m in threats for h0, h1 in ((8.0, 4.5), (8.0, 9.0), (7.0, 6.5), (7.0, 8.0)))
+            return all(not raylib.clear((m["pos"][0], m["pos"][1], m["pos"][2] + 8.0 * (1.0 + SIZE_PER_CUBE * (m.get("cubes") or 0))),
+                                        (px, py, gz + h)) for m in threats for h in (4.5 * s, 9.0 * s))
         if hidden(x, y, z):
             return (x, y)
         c = self.cover
@@ -713,7 +716,7 @@ class Bot:
             self.retreating = True
         cornered = any(math.dist(m["pos"][:2], (x, y)) < CORNER_M for m in threats)
         if self.retreating and not cornered:
-            spot = self.cover_spot(t, x, y, z, threats, ccx, ccy, cr)
+            spot = self.cover_spot(t, x, y, z, threats, ccx, ccy, cr, me.get("cubes") or 0)
             if spot == (x, y):
                 mx = my = 0.0
                 finish = any(m.get("hp") is not None and m["hp"] < 0.15 * (m.get("max_hp") or 1400)

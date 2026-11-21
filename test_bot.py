@@ -1032,6 +1032,26 @@ class TestLineOfFire(Base):
         self.assertNotEqual(self.bot_with(low_wall).cover_spot(0.0, 30, 0, 0.0, threat, 0, 0, 1e9), (30, 0))
         self.assertEqual(self.bot_with(self.BUILDING).cover_spot(0.0, 30, 0, 0.0, threat, 0, 0, 1e9), (30, 0))
 
+    def test_cubes_make_us_taller_so_a_wall_can_stop_hiding_us(self):
+        wall = {"kind": "building", "base": -10, "top": 9.5, "ring": [33, -20, 36, -20, 36, 20, 33, 20]}
+        threat = [mech(5, (100, 0, 0))]
+        self.assertEqual(self.bot_with(wall).cover_spot(0.0, 30, 0, 0.0, threat, 0, 0, 1e9, cubes=0), (30, 0))
+        self.assertNotEqual(self.bot_with(wall).cover_spot(0.0, 30, 0, 0.0, threat, 0, 0, 1e9, cubes=4), (30, 0))  # top 10.8 m
+        for cubes, searched in ((0, False), (4, True)):  # act passes our own cube count
+            bot = self.bot_with(wall)
+            o = self.retreat_obs((30, 0, 0), 300)
+            o["self"]["cubes"] = cubes
+            bot.act(o)
+            self.assertEqual(bot.cover is not None, searched)  # hidden where we stand: no search
+
+    def test_cover_tests_two_sight_lines_per_threat(self):  # eye to our centre and top; no extra muzzle rays
+        import unittest.mock as um
+        bot = self.bot_with()
+        calls = []
+        with um.patch.object(botmod.raylib, "clear", side_effect=lambda a, b, *k: calls.append(1) or False):
+            self.assertEqual(bot.cover_spot(0.0, 30, 0, 0.0, [mech(5, (100, 0, 0)), mech(6, (0, 100, 0))], 0, 0, 1e9), (30, 0))
+        self.assertEqual(len(calls), 4)
+
     def test_no_cover_spot_past_the_zone_edge_line(self):
         threat = [mech(5, (100, 0, 0))]
         self.assertIsNotNone(self.bot_with(self.BUILDING).cover_spot(0.0, 30, 40, 0.0, threat, 0, 0, 1e9))
