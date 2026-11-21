@@ -1,4 +1,5 @@
 """Scenario tests for Bot.act. Run: python test_bot.py (stdlib only)."""
+import atexit
 import copy
 import gzip
 import json
@@ -23,8 +24,14 @@ LIGHT = {"damage": 60, "cooldown": 0.25, "range": 45, "cone_deg": 30, "chain": 2
 MORT = {"damage": 200, "splash": 160, "cooldown": 2.6, "speed": 72, "gravity": 22}
 STATS = {"walk_speed": 11.7, "boost_speed": 19.5, "turn_rate": 4, "pitch_rate": 3, "min_pitch": -0.7,
          "max_pitch": 1.3, "muzzle_height": 7, "near_range_bonus": 0, "vision_bonus": 0}
+# an empty world, so the shared ray test never reads the real campus map in unit tests
+EMPTY_MAP = tempfile.mkdtemp(prefix="empty_map_")
+os.makedirs(os.path.join(EMPTY_MAP, "v2"))
+with open(os.path.join(EMPTY_MAP, "v2", "world.json"), "w") as _f:
+    json.dump({"prisms": []}, _f)
+atexit.register(shutil.rmtree, EMPTY_MAP, True)
 HELLO = {"type": "hello", "protocol": "mechfight/1", "slot": 0, "seed": 1,
-         "map": {"dir": "/arena", "files": []},
+         "map": {"dir": EMPTY_MAP, "files": []},
          "config": {"loot": {"pickup_radius": 4}, "weapons": {"mortar": {"gravity": 22}},
                     "vision": {"range": 200, "fov_deg": 120, "near_range": 45, "memory_s": 5}}}
 STREAM_CANDIDATES = [
@@ -120,6 +127,14 @@ class Base(unittest.TestCase):
         x, y, z = me_pos
         tx, ty, tz = tgt_pos
         return [math.atan2(ty - y, tx - x), math.atan2(tz + d_z - (z + muzzle), math.hypot(tx - x, ty - y))]
+
+
+class FallbackBase(Base):
+    """Runs the v3 aim and fire logic (what the bot falls back to when the aim module fails)."""
+
+    def setUp(self):
+        super().setUp()
+        self.bot.aim_ok = False
 
 
 class TestWeaponGrab(Base):
@@ -288,7 +303,7 @@ class TestMortar(Base):
         self.assertEqual(a.get("drop"), 1)
 
 
-class TestLaser(Base):
+class TestLaser(FallbackBase):
     def enemy(self, pos=(150, 20, 0), vel=(0, 11.7, 0)):
         return mech(5, pos, vel)
 
@@ -846,11 +861,14 @@ class TestLineOfFire(Base):
         self.assertTrue(self.shoot(self.bot_with(), (215, 0, 0))["fire"][0])
 
     def test_unreadable_map_means_no_line_of_fire_check(self):
+        import unittest.mock as um
         hello = copy.deepcopy(HELLO)
-        hello["map"]["dir"] = os.path.join(HERE, "no-such-dir")
-        self.assertTrue(self.shoot(Bot(hello), (100, 0, 0))["fire"][0])
         del hello["map"]
-        self.assertTrue(self.shoot(Bot(hello), (100, 0, 0))["fire"][0])
+        with um.patch.object(botmod.raylib, "clear", side_effect=OSError("gone")):
+            self.assertTrue(self.shoot(Bot(hello), (100, 0, 0))["fire"][0])
+            bot = Bot(hello)
+            bot.aim_ok = False  # the v3 helper too
+            self.assertTrue(self.shoot(bot, (100, 0, 0))["fire"][0])
 
 
 class TestSupplyDrop(Base):
@@ -959,7 +977,7 @@ class TestDropGuards(Base):
         self.assertEqual(bot.detour, 0)
 
 
-class TestLaserGrace(Base):
+class TestLaserGrace(FallbackBase):
     def setUp(self):
         super().setUp()
         self.e = mech(5, (150, 20, 0))
@@ -994,10 +1012,8 @@ class TestLaserGrace(Base):
 class TestStateRestore(Base):
     def test_failed_pass_leaves_no_counters_behind(self):
         class Flaky(Bot):
-            def los_clear(self, me, tgt):
-                if not self.lite:
-                    raise IndexError("map")
-                return True
+            def _gate_fire(self, *args):
+                raise IndexError("gate")
 
         bot = Flaky(HELLO)
         obs = make_obs(t=3, pickups=[pickup(1, "laser", (60, 0, 0))], mechs=[mech(5, (100, 0, 0))], vel=(0, 0, 0))
@@ -1009,10 +1025,8 @@ class TestStateRestore(Base):
 
     def test_events_are_counted_once_when_a_pass_fails(self):
         class Flaky(Bot):
-            def los_clear(self, me, tgt):
-                if not self.lite:
-                    raise IndexError("map")
-                return True
+            def _gate_fire(self, *args):
+                raise IndexError("gate")
 
         bot = Flaky(HELLO)
         ev = [{"type": "take_failed", "id": 7, "reason": "range"}]
@@ -1088,29 +1102,47 @@ def find_arena():
 
 class TestRealMapCost(unittest.TestCase):
     @unittest.skipUnless(find_arena(), "kit arena not found (set MECHFIGHT_ARENA)")
-    def test_fifteen_mechs_around_us_on_the_real_map(self):
+    def test_sixteen_mechs_around_us_on_the_real_map(self):
+        import unittest.mock as um
         hello = copy.deepcopy(HELLO)
         hello["map"]["dir"] = find_arena()
         bot = Bot(hello)
         self.assertGreater(len(bot.prisms), 100)
+        calls = [0]
+        real_clear = botmod.raylib.clear
+
+        def counting(a, b, terrain=True):
+            calls[0] += 1
+            return real_clear(a, b, terrain)
+
         rng = random.Random(5)
-        times = []
-        for k in range(300):
-            cx, cy = rng.uniform(-300, 400), rng.uniform(-250, 330)
-            ms = []
-            for j in range(15):
-                ang, r = rng.uniform(-math.pi, math.pi), rng.uniform(60, 195)
-                ms.append(mech(j + 1, (cx + r * math.cos(ang), cy + r * math.sin(ang), 0)))
-            obs = make_obs(tick=k, t=30 + k / 10, pos=(cx, cy, 0), aim=(rng.uniform(-math.pi, math.pi), 0),
-                           weapons=[gun(), laser()], mechs=ms,
-                           events=[{"type": "damaged", "amount": 45, "weapon": "gun", "bearing": 0.0, "by": 5}])
-            t0 = time.perf_counter()
-            a = bot.act(obs)
-            times.append((time.perf_counter() - t0) * 1000)
-            self.assertEqual(problems(obs, a), [])
+        times, most_calls = [], 0
+        with um.patch.object(botmod.raylib, "clear", side_effect=counting):
+            for k in range(400):
+                cx, cy = rng.uniform(-300, 400), rng.uniform(-250, 330)
+                ms = []
+                for j in range(16):
+                    ang, r = rng.uniform(-math.pi, math.pi), rng.uniform(40, 195)
+                    m = mech(j + 1, (cx + r * math.cos(ang), cy + r * math.sin(ang), 0),
+                             (rng.uniform(-10, 10), rng.uniform(-10, 10), 0))
+                    m["aim"] = [rng.uniform(-3, 3), 0]
+                    ms.append(m)
+                ws = [[gun(), laser()], [gun(), lightning()], [gun(), None]][k % 3]
+                obs = make_obs(tick=k, t=30 + k / 10, pos=(cx, cy, 0), aim=(rng.uniform(-math.pi, math.pi), 0),
+                               weapons=ws, mechs=ms,
+                               events=[{"type": "damaged", "amount": 45, "weapon": "gun", "bearing": 0.0, "by": 5}]
+                               if k % 2 == 0 else [])
+                calls[0] = 0
+                t0 = time.perf_counter()
+                a = bot.act(obs)
+                times.append((time.perf_counter() - t0) * 1000)
+                most_calls = max(most_calls, calls[0])
+                self.assertEqual(problems(obs, a), [])
         self.assertEqual(bot.errors, 0)
+        self.assertEqual(bot.aim_errors, 0)
+        self.assertLessEqual(most_calls, 6)  # a few lines of fire per decision, not one per mech
         self.assertLess(max(times), 10.0, f"slowest decision {max(times):.2f} ms")
-        print(f"\nreal map, 15 mechs: max {max(times):.2f} ms", file=sys.stderr)
+        print(f"\nreal map, 16 mechs: max {max(times):.2f} ms, most ray calls {most_calls}", file=sys.stderr)
 
 
 class TestMapLog(Base):
@@ -1133,10 +1165,12 @@ class TestMapLog(Base):
         hello["map"]["dir"] = d
         out, bot = self.log_for(hello)
         self.assertEqual(len(bot.prisms), 3)
-        self.assertIn(f"map: prisms=3 dir={d}", out)
+        self.assertIn(f"map: prisms=3 dir={d} ray=3", out)
 
     def test_hello_logs_zero_when_the_map_is_missing(self):
-        out, bot = self.log_for(copy.deepcopy(HELLO))  # /arena does not exist here
+        hello = copy.deepcopy(HELLO)
+        hello["map"]["dir"] = "/arena"  # does not exist here
+        out, bot = self.log_for(hello)
         self.assertEqual(bot.prisms, [])
         self.assertIn("map: prisms=0 dir=/arena", out)
 
@@ -1148,6 +1182,155 @@ class TestMapLog(Base):
         self.assertEqual(len(bot.prisms), 259)
         self.assertIsNotNone(bot.bounds)
         self.assertIn("map: prisms=259", out)
+
+
+class TestAimWiring(Base):
+    HIT = [{"type": "damaged", "amount": 45, "weapon": "gun", "bearing": 0.0, "by": 5}]
+
+    def test_aim_module_is_in_charge(self):
+        self.assertTrue(self.bot.aim_ok)
+        e = mech(5, (150, 20, 0), (0, 11.7, 0))
+        a = self.act(make_obs(weapons=[gun(), laser()], mechs=[e]))
+        self.assertTrue(a["fire"][1])  # laser starts charging
+        self.assertLess(abs(a["aim"][0] - math.atan2(20, 150)), 0.03)
+        on = list(a["aim"])
+        a = self.act(make_obs(tick=2, aim=on, weapons=[gun(), laser(charge=0.75)], mechs=[e]))
+        self.assertFalse(a["fire"][1])  # full and on target: released
+
+    def test_engagement_gate_keeps_the_gun_quiet_until_provoked(self):
+        e = mech(5, (150, 0, 0))
+        obs = make_obs(mechs=[e])
+        obs["self"]["aim"], _ = self.bot.lead_aim(obs["self"], e, 252)
+        self.assertFalse(self.act(obs)["fire"][0])
+        hit = make_obs(tick=2, mechs=[e], events=self.HIT)
+        hit["self"]["aim"] = obs["self"]["aim"]
+        self.assertTrue(self.act(hit)["fire"][0])
+
+    def test_fleeing_lets_a_charging_laser_go(self):
+        e = mech(5, (100, 0, 0))
+        a = self.act(make_obs(hp=400, weapons=[gun(), laser(charge=0.3)], mechs=[e]))
+        self.assertFalse(a["fire"][1])
+
+    def test_new_laser_charge_needs_a_mech_in_view_within_200_m(self):
+        obs = make_obs(weapons=[gun(), laser()], mechs=[mech(5, (215, 0, 0))])
+        obs["self"]["stats"]["vision_bonus"] = 25
+        self.assertFalse(self.act(obs)["fire"][1])
+        a = self.act(make_obs(tick=2, weapons=[gun(), laser()], mechs=[mech(5, (-120, 0, 0))]))
+        self.assertFalse(a["fire"][1])  # memory only: behind us, beyond the proximity range
+
+    def test_laser_is_not_started_at_a_drone_that_hit_us(self):
+        e = mech(104, (40, 0, 0), kind="npc")
+        obs = make_obs(weapons=[gun(), laser()], mechs=[e], events=[
+            {"type": "damaged", "amount": 25, "weapon": "npc", "bearing": 0.0, "by": 104}])
+        obs["self"]["aim"], _ = self.bot.lead_aim(obs["self"], e, 252)
+        a = self.act(obs)
+        self.assertFalse(a["fire"][1])
+        self.assertTrue(a["fire"][0])  # but the gun answers
+
+    def test_idle_drone_is_not_a_target_and_a_mech_beats_a_hitting_drone(self):
+        a = self.act(make_obs(mechs=[mech(104, (30, 0, 0), kind="npc")]))
+        self.assertEqual(a["fire"], [False, False])
+        drone = mech(104, (30, 5, 0), kind="npc")
+        mech_far = mech(5, (-100, 0, 0))
+        a = self.act(make_obs(tick=2, mechs=[drone, mech_far], events=[
+            {"type": "damaged", "amount": 25, "weapon": "npc", "bearing": 0.0, "by": 104}]))
+        self.assertAlmostEqual(abs(a["aim"][0]), math.pi, places=1)  # faces the mech, as v3 did
+
+    def test_grace_hold_after_the_target_leaves_view(self):
+        e = mech(5, (150, 20, 0))
+        a = self.act(make_obs(t=30, weapons=[gun(), laser(charge=0.3)], mechs=[e]))
+        self.assertTrue(a["fire"][1])
+        last = a["aim"]
+        a = self.act(make_obs(tick=2, t=30.3, weapons=[gun(), laser(charge=0.6)], mechs=[]))
+        self.assertTrue(a["fire"][1])
+        self.assertAlmostEqual(a["aim"][0], last[0])
+        a = self.act(make_obs(tick=3, t=30.6, weapons=[gun(), laser(charge=0.75)], mechs=[]))
+        self.assertFalse(a["fire"][1])
+
+    def test_a_charge_in_progress_is_kept_even_when_the_target_drifts_past_200_m(self):
+        e = mech(5, (215, 0, 0))
+        obs = make_obs(weapons=[gun(), laser(charge=0.3)], mechs=[e])
+        obs["self"]["stats"]["vision_bonus"] = 25
+        obs["self"]["aim"], _ = self.bot.lead_aim(obs["self"], e, 252)
+        self.assertTrue(self.act(obs)["fire"][1])
+
+    def test_grace_hold_is_off_when_fleeing(self):
+        e = mech(5, (150, 20, 0))
+        self.act(make_obs(t=30, weapons=[gun(), laser(charge=0.3)], mechs=[e]))
+        a = self.act(make_obs(tick=2, t=30.1, hp=400, weapons=[gun(), laser(charge=0.4)], mechs=[]))
+        self.assertFalse(a["fire"][1])
+
+    def test_no_hold_without_a_charge_in_progress(self):
+        e = mech(5, (150, 20, 0))
+        self.act(make_obs(t=30, weapons=[gun(), laser()], mechs=[e]))
+        a = self.act(make_obs(tick=2, t=30.1, weapons=[gun(), laser(charge=0.0)], mechs=[]))
+        self.assertFalse(a["fire"][1])
+
+    def test_reload_comes_from_the_aim_plan_and_the_v3_rule(self):
+        a = self.act(make_obs(weapons=[gun(ammo=0), None], mechs=[mech(5, (100, 0, 0))]))
+        self.assertTrue(a.get("reload"))
+        a = self.act(make_obs(tick=2, weapons=[gun(ammo=3), None]))
+        self.assertTrue(a.get("reload"))  # quiet moment, low magazine
+
+    def test_aim_failure_falls_back_to_v3_logic(self):
+        import unittest.mock as um
+        e = mech(5, (100, 0, 0))
+        obs = make_obs(mechs=[e])
+        obs["self"]["aim"], _ = self.bot.lead_aim(obs["self"], e, 252)
+        with um.patch.object(botmod.aimlib, "decide", side_effect=RuntimeError("boom")):
+            a = self.act(obs)
+            self.assertTrue(a["fire"][0])
+            self.assertEqual(self.bot.aim_errors, 1)
+
+        def failing(obs, **kw):
+            botmod.aimlib.last_plan = {"error": "ValueError: x", "fire": [False, False], "aim": None}
+            return None, [False, False], None
+
+        with um.patch.object(botmod.aimlib, "decide", side_effect=failing):
+            a = self.act(dict(obs, tick=2))
+            self.assertTrue(a["fire"][0])
+            self.assertEqual(self.bot.aim_errors, 2)
+
+    def test_lite_pass_and_a_missing_aim_module_use_v3_logic(self):
+        self.bot.lite = True
+        self.assertIsNone(self.bot._aim_plan(make_obs(), []))
+        self.bot.lite = False
+        self.bot.aim_ok = False
+        self.assertIsNone(self.bot._aim_plan(make_obs(), []))
+        e = mech(5, (100, 0, 0))
+        obs = make_obs(mechs=[e])
+        obs["self"]["aim"], _ = self.bot.lead_aim(obs["self"], e, 252)
+        self.assertTrue(self.act(obs)["fire"][0])
+
+    def test_line_of_fire_goes_through_ray_clear(self):
+        import unittest.mock as um
+        e = mech(5, (100, 0, 0))
+        obs = make_obs(mechs=[e], events=self.HIT)
+        obs["self"]["aim"], _ = self.bot.lead_aim(obs["self"], e, 252)
+        calls = []
+
+        def blocked(a, b, terrain=True):
+            calls.append((a, b))
+            return False
+
+        with um.patch.object(botmod.raylib, "clear", side_effect=blocked):
+            a = self.act(obs)
+        self.assertFalse(a["fire"][0])
+        self.assertTrue(calls)
+        self.assertAlmostEqual(calls[0][0][2], 7.0)  # from the muzzle
+
+    def test_v3_los_helper_uses_ray(self):
+        import unittest.mock as um
+        me = make_obs()["self"]
+        e = mech(5, (100, 0, 0))
+        with um.patch.object(botmod.raylib, "clear", return_value=False) as c:
+            self.assertFalse(self.bot.los_clear(me, e))
+            self.assertEqual(c.call_count, 1)
+            self.bot.los_clear(me, e)
+            self.assertEqual(c.call_count, 1)  # cached per decision
+        self.bot.lite = True
+        self.bot._los_cache = {}
+        self.assertTrue(self.bot.los_clear(me, e))
 
 
 class TestDetour(Base):
@@ -1189,10 +1372,8 @@ class TestDetour(Base):
 class TestDegradedDecision(Base):
     def test_failing_map_part_still_fires_and_moves(self):
         class Flaky(Bot):
-            def los_clear(self, me, tgt):
-                if not self.lite:
-                    raise IndexError("map")
-                return True
+            def _gate_fire(self, *args):
+                raise IndexError("gate")
 
         bot = Flaky(HELLO)
         e = mech(5, (100, 0, 0))

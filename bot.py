@@ -5,6 +5,12 @@ import os
 import traceback
 import mechfight as mf
 
+try:
+    import aim as aimlib
+    import ray as raylib
+except Exception:  # helper modules missing or broken: v3 aim, fire and line-of-fire logic only
+    aimlib = raylib = None
+
 TAU = 2 * math.pi
 # upgrade preference order: the first id present in an offer is picked
 UPGRADE_PRIO = ["armor", "plating", "nanites", "sensors", "servos", "gun_damage", "gun_rate"]
@@ -72,7 +78,20 @@ class Bot:
         self.vis_near = v.get("near_range", 45)
         self.vis_fov = math.radians(v.get("fov_deg", 120))
         self.prisms, self.bounds = load_map(hello)
-        mf.log(f"map: prisms={len(self.prisms)} dir={hello.get('map', {}).get('dir')}")
+        self.aim_ok = False
+        if aimlib is not None:
+            try:
+                aimlib.init(hello)  # also loads the map for the shared ray test
+                self.aim_ok = True
+            except Exception:
+                mf.log(f"aim.init failed: {traceback.format_exc()}")
+        ray_n = 0
+        try:
+            ray_n = len(raylib._default.prisms) if self.aim_ok else 0
+        except Exception:
+            pass
+        mf.log(f"map: prisms={len(self.prisms)} dir={hello.get('map', {}).get('dir')} ray={ray_n}")
+        self.aim_errors = 0
         self.stuck = 0          # decisions in a row we wanted to move but barely did
         self.detour = 0         # decisions left on a sideways detour
         self.detour_sign = 1
@@ -148,28 +167,139 @@ class Bot:
         return self._los_cache[key]
 
     def _los_raw(self, me, tgt):
-        """False when a building, stadium or bridge stands between our muzzle and the target's centre."""
-        if not self.prisms or self.lite:
+        """False when a building, stadium, bridge or the ground is in the way (the shared exact ray test)."""
+        if raylib is None or self.lite:
             return True
         x, y, z = me["pos"]
         mz = z + me["stats"].get("muzzle_height", 7)
         tx, ty, tz = tgt["pos"]
         tz += 4.5 if tgt["kind"] == "mech" else 1.75
-        lox, hix, loy, hiy = min(x, tx), max(x, tx), min(y, ty), max(y, ty)
-        loz, hiz = min(mz, tz), max(mz, tz)
-        cand = [p for p in self.prisms if p[0] <= hix and p[2] >= lox and p[1] <= hiy and p[3] >= loy
-                and p[5] >= loz and p[4] <= hiz]
-        if not cand:
+        try:
+            return bool(raylib.clear((x, y, mz), (tx, ty, tz)))
+        except Exception:
             return True
-        n = max(2, min(int(math.hypot(tx - x, ty - y) / 2.0), 120))  # 2 m steps, buildings are thicker
-        for i in range(1, n):
-            f = i / n
-            px, py, pz = x + (tx - x) * f, y + (ty - y) * f, mz + (tz - mz) * f
-            for p in cand:
-                if (p[4] <= pz <= p[5] and p[0] <= px <= p[2] and p[1] <= py <= p[3]
-                        and inside(px, py, p[6]) and not any(inside(px, py, h) for h in p[7])):
-                    return False
-        return True
+
+    def _aim_plan(self, obs, hitters):
+        """aim.decide for this observation, or None when it is unavailable or failed (v3 logic then runs)."""
+        if self.lite or not self.aim_ok:
+            return None
+        try:
+            use, npcs_ok = obs, False
+            if hitters:  # only drones that hit us in the last 2 s are targets
+                use = dict(obs, mechs=[m for m in obs["mechs"] if m.get("kind") == "mech" or m in hitters])
+                npcs_ok = True
+            a, f, tg = aimlib.decide(use, los=raylib.clear, hide=False, deadline=None, include_npcs=npcs_ok)
+            plan = aimlib.last_plan
+            if "error" in plan:
+                raise RuntimeError(plan["error"])
+            return {"aim": a, "fire": list(f), "target": tg, "reload": bool(plan.get("reload"))}
+        except Exception:
+            self.aim_errors += 1
+            if self.aim_errors <= 3:
+                mf.log(f"aim.decide failed, v3 logic this tick: {traceback.format_exc()}")
+            return None
+
+    def _gate_fire(self, raw, target, me, ws, mechs, flee, t):
+        """v3's engagement rules on top of the aim module's per-slot fire flags."""
+        fire = [False, False]
+        if target is None:  # a charging laser keeps its trigger for 0.5 s after the target left view
+            for i, w in enumerate(ws):
+                if (w and w.get("kind") == "laser" and (w.get("charge") or 0) > 0 and not flee
+                        and t - self.lt_t <= 0.5):
+                    fire[i] = bool(raw[i])
+            return fire
+        x, y, z = me["pos"]
+        d = math.dist(target["pos"][:3], (x, y, z))
+        in_view = self.in_view(me, target)
+        seen = in_view or t - self.dmg_t < 3  # a track that is hitting us counts as seen
+        laser_held = any(w and w.get("kind") == "laser" for w in ws)
+        engaged = t - self.dmg_t < 3 or d < 120 or laser_held or any(
+            abs(ang_diff(m["aim"][0], math.atan2(y - m["pos"][1], x - m["pos"][0]))) < 0.12
+            for m in mechs if m.get("aim"))
+        for i, w in enumerate(ws):
+            if not w or not raw[i]:
+                continue
+            kind = w.get("kind")
+            if kind == "gun":
+                fire[i] = seen and engaged
+            elif kind == "lightning":
+                fire[i] = seen
+            elif kind == "laser":
+                if flee:
+                    fire[i] = False
+                elif (w.get("charge") or 0) > 0:
+                    fire[i] = True  # already charging: the aim module holds or releases
+                else:  # a new charge only at a mech in view within 200 m
+                    fire[i] = in_view and d < 200 and target.get("kind") == "mech"
+        return fire
+
+    def _v3_fire(self, me, t, target, mechs, flee, slot, gun, las, light, gun_i, las_i, light_i):
+        """v3 aim and fire decision: used when the aim module is unavailable or fails. Returns (aim or None, fire)."""
+        x, y, z = me["pos"]
+        fire = [False, False]
+        aim_cmd = None
+        # laser: only at a mech in view now with a clear line, not while fleeing, inside ~200 m
+        lt, aim_l, dl = None, None, 0.0
+        if las and not flee:
+            lrange = min(las.get("stats", {}).get("range", 280), 200)
+            for m in mechs[:4]:  # nearest few only: each line of fire costs time
+                a_l, d_l = self.direct_aim(me, m)
+                if d_l < lrange and self.in_view(me, m) and self.los_clear(me, m):
+                    lt, aim_l, dl = m, a_l, d_l
+                    break
+        charge = las.get("charge", 0) if las else 0
+        full = las.get("stats", {}).get("charge", 0.75) if las else 0.75
+        if charge >= full - 0.01:  # the reported charge is capped at full: time the hold ourselves
+            if self.full_t is None:
+                self.full_t = t
+        else:
+            self.full_t = None
+        laser_aims = grace = False
+        overdue = self.full_t is not None and t - self.full_t > 0.5
+        if lt is not None:
+            self.lt_t, self.lt_aim = t, aim_l
+            laser_aims = charge > 0 or las.get("cooldown", 0) < 0.3
+            tol = min(max(math.atan2(2.0, dl), 0.01), 0.05)
+            on = abs(ang_diff(me["aim"][0], aim_l[0])) < tol and abs(me["aim"][1] - aim_l[1]) < 0.08
+            # hold to charge; let go when full and on target, or after 0.5 s at full
+            fire[las_i] = not (charge >= full - 0.01 and (on or overdue))
+        elif las and not flee and charge > 0 and self.lt_aim is not None and t - self.lt_t <= 0.5:
+            grace = True  # target just left view: keep the charge and the aim for a moment
+            fire[las_i] = not (charge >= full - 0.01 and overdue)
+
+        if target is not None:
+            gst = gun.get("stats", {}) if gun else {}
+            aim, d = self.lead_aim(me, target, gst.get("speed", 252) or 252)
+            err = abs(ang_diff(me["aim"][0], aim[0]))
+            aim_cmd = aim_l if laser_aims else aim
+            # shoot only what we could see now, through a clear line
+            seen = self.in_view(me, target) or t - self.dmg_t < 3  # a track that is hitting us counts as seen
+            if seen and self.los_clear(me, target):
+                # commit to a fight: we were hit, it is close, we hold a laser, or a visible mech is aiming at us
+                engaged = t - self.dmg_t < 3 or d < 120 or las is not None or any(
+                    abs(ang_diff(m["aim"][0], math.atan2(y - m["pos"][1], x - m["pos"][0]))) < 0.12
+                    for m in mechs if m.get("aim"))
+                tol = min(0.06, max(math.atan2(2.0, d), 0.008))  # inside the target's angular size
+                if gun and engaged and d < gst.get("range", 230) and err < tol and gun.get("ammo", 1) > 0:
+                    fire[gun_i] = True
+                if light and d < light.get("stats", {}).get("range", 45) and err < 0.4 and me["energy"] > 10:
+                    fire[light_i] = True
+        if grace:
+            aim_cmd = list(self.lt_aim)
+        return aim_cmd, fire
+
+    def _idle_aim(self, me, t, hit_recent, empty, grab, mx, my, n):
+        """Aim when there is nothing to shoot at: face the hit, scan early, face the noise or the heading."""
+        facing = self.threat_yaw is not None and t - self.threat_t < 4
+        if hit_recent and facing:
+            return [self.threat_yaw, 0.0]   # face the attacker: rear hits do x1.5
+        if t < 20 and empty and grab is None:
+            return [me["aim"][0] + 1.0, 0.0]  # early: scan 360 for weapons (aim drives vision)
+        if facing:
+            return [self.threat_yaw, 0.0]   # face the noise
+        if n > 0:
+            return [math.atan2(my, mx), 0.0]
+        return [me["aim"][0] + 0.5, 0.0]  # idle: scan around
 
     def free_run(self, x, y, z, ang, maxd=60.0):
         """Metres we can walk along a heading before a solid prism stands in the way (maxd if none)."""
@@ -225,7 +355,7 @@ class Bot:
                 continue
             if math.hypot(d["pos"][0] - ccx, d["pos"][1] - ccy) > cr - 10:
                 continue
-            if any(math.dist(m["pos"][:2], d["pos"][:2]) < 60 or math.dist(m["pos"][:2], (x, y)) < 60 for m in mechs):
+            if any(math.dist(m["pos"][:2], d["pos"][:2]) < 60 for m in mechs):
                 continue
             best, bd = d, dist
         return best
@@ -490,77 +620,37 @@ class Bot:
             or bool(dodge_boost and energy_ok)
         act.update(move=[mx, my], boost=boost or jet, jump=jump)
 
-        # ---- aim and fire ----
+        # ---- aim and fire: the aim module decides, v3's engagement rules gate it; v3 logic if it fails ----
         target = mechs[0] if mechs else None
+        hitters = []
         if target is None:
             hitters = [m for m in npcs if math.dist(m["pos"][:2], (x, y)) < 60 and t - self.dmg_t < 2]
             target = hitters[0] if hitters else None
         fire = [False, False]
-
-        # laser: only at a mech in view now with a clear line, not while fleeing, inside ~200 m
-        lt, aim_l, dl = None, None, 0.0
-        if las and not flee:
-            lrange = min(las.get("stats", {}).get("range", 280), 200)
-            for m in mechs[:4]:  # nearest few only: each line of fire costs time
-                a_l, d_l = self.direct_aim(me, m)
-                if d_l < lrange and self.in_view(me, m) and self.los_clear(me, m):
-                    lt, aim_l, dl = m, a_l, d_l
-                    break
-        charge = las.get("charge", 0) if las else 0
-        full = las.get("stats", {}).get("charge", 0.75) if las else 0.75
-        if charge >= full - 0.01:  # the reported charge is capped at full: time the hold ourselves
-            if self.full_t is None:
-                self.full_t = t
+        aim_cmd = None
+        reload_cmd = False
+        plan = self._aim_plan(obs, hitters)
+        if plan is not None:
+            target = plan["target"]
+            fire = self._gate_fire(plan["fire"], target, me, ws, mechs, flee, t)
+            aim_cmd = plan["aim"]
+            reload_cmd = plan["reload"]
+            if las is not None:
+                if target is not None and aim_cmd is not None:
+                    self.lt_t, self.lt_aim = t, list(aim_cmd)  # remembered for the grace hold
+                elif target is None and fire[las_i] and self.lt_aim is not None:
+                    aim_cmd = list(self.lt_aim)
         else:
-            self.full_t = None
-        laser_aims = grace = False
-        overdue = self.full_t is not None and t - self.full_t > 0.5
-        if lt is not None:
-            self.lt_t, self.lt_aim = t, aim_l
-            laser_aims = charge > 0 or las.get("cooldown", 0) < 0.3
-            tol = min(max(math.atan2(2.0, dl), 0.01), 0.05)
-            on = abs(ang_diff(me["aim"][0], aim_l[0])) < tol and abs(me["aim"][1] - aim_l[1]) < 0.08
-            # hold to charge; let go when full and on target, or after 0.5 s at full
-            fire[las_i] = not (charge >= full - 0.01 and (on or overdue))
-        elif las and not flee and charge > 0 and self.lt_aim is not None and t - self.lt_t <= 0.5:
-            grace = True  # target just left view: keep the charge and the aim for a moment
-            fire[las_i] = not (charge >= full - 0.01 and overdue)
-
-        if target is not None:
-            gst = gun.get("stats", {}) if gun else {}
-            aim, d = self.lead_aim(me, target, gst.get("speed", 252) or 252)
-            err = abs(ang_diff(me["aim"][0], aim[0]))
-            act["aim"] = aim_l if laser_aims else aim
-            # shoot only what we could see now, through a clear line
-            seen = self.in_view(me, target) or t - self.dmg_t < 3  # a track that is hitting us counts as seen
-            if seen and self.los_clear(me, target):
-                # commit to a fight: we were hit, it is close, we hold a laser, or a visible mech is aiming at us
-                engaged = t - self.dmg_t < 3 or d < 120 or las is not None or any(
-                    abs(ang_diff(m["aim"][0], math.atan2(y - m["pos"][1], x - m["pos"][0]))) < 0.12
-                    for m in mechs if m.get("aim"))
-                tol = min(0.06, max(math.atan2(2.0, d), 0.008))  # inside the target's angular size
-                if gun and engaged and d < gst.get("range", 230) and err < tol and gun.get("ammo", 1) > 0:
-                    fire[gun_i] = True
-                if light and d < light.get("stats", {}).get("range", 45) and err < 0.4 and me["energy"] > 10:
-                    fire[light_i] = True
-        else:
-            facing = self.threat_yaw is not None and t - self.threat_t < 4
-            if hit_recent and facing:
-                act["aim"] = [self.threat_yaw, 0.0]   # face the attacker: rear hits do x1.5
-            elif t < 20 and empty and grab is None:
-                act["aim"] = [me["aim"][0] + 1.0, 0.0]  # early: scan 360 for weapons (aim drives vision)
-            elif facing:
-                act["aim"] = [self.threat_yaw, 0.0]   # face the noise
-            elif n > 0:
-                act["aim"] = [math.atan2(my, mx), 0.0]
-            else:
-                act["aim"] = [me["aim"][0] + 0.5, 0.0]  # idle: scan around
-        if grace:
-            act["aim"] = list(self.lt_aim)
+            aim_cmd, fire = self._v3_fire(me, t, target, mechs, flee, slot, gun, las, light, gun_i, las_i, light_i)
+        if aim_cmd is None:
+            aim_cmd = self._idle_aim(me, t, hit_recent, empty, grab, mx, my, n)
+        act["aim"] = [float(aim_cmd[0]), float(aim_cmd[1])]
         if gun and gun.get("reload", 0) == 0:
             ammo = gun.get("ammo", 99)
             if ammo == 0 or (ammo <= 4 and target is None):
-                act["reload"] = True
+                reload_cmd = True
+        if reload_cmd:
+            act["reload"] = True
         act["fire"] = fire
 
         mf.draw.label(f"hp {me['hp']:.0f} z{dz:.0f}/{safe_r:.0f}{' FLEE' if flee else ''}{' GRAB' if grab else ''}")
