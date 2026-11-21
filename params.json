@@ -1,0 +1,19 @@
+{
+ "retreat_hp": 0.3,
+ "return_hp": 0.8,
+ "threat_m": 200.0,
+ "hurt_hp": 0.45,
+ "hurt_near_m": 120.0,
+ "dodge_range_m": 300.0,
+ "dodge_angle": 0.3,
+ "boost_min_energy": 25.0,
+ "detour_ticks": 25,
+ "chase_hp": 0.8,
+ "chase_start_range": 200.0,
+ "chase_hold_range": 60.0,
+ "grab_give_up_s": 25.0,
+ "loot_cap_s": 6.0,
+ "rest_max_s": 2.0,
+ "gun_min_p": 0.35,
+ "laser_release_p": 0.6
+}

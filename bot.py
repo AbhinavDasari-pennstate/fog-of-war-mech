@@ -47,10 +47,79 @@ THREAT_M = 200.0  # mechs this close count for cover
 COVER_RECHECK_S = 0.5  # reuse a found spot (or a miss) this long; a found spot is re-tested every decision
 SIZE_PER_CUBE = 0.05  # protocol: each cube scales height, eye and muzzle by 1 + 0.05 x cubes (no cap)
 COVER_BUDGET_MS = 8.0  # a search stops here (the real map, no cover in reach, costs up to about 35 ms)
+HURT_HP, HURT_NEAR_M = 0.45, 120.0  # under HURT_HP never walk at a mech within HURT_NEAR_M (in the zone)
+DODGE_RANGE_M, DODGE_ANGLE, DODGE_BOOST_M = 300.0, 0.3, 60.0  # sidestep a laser charging at us from this close,
+#                                           aimed within DODGE_ANGLE rad of us; boost the sidestep inside DODGE_BOOST_M
+DETOUR_TICKS = 25  # decisions on a stuck detour
+BOOST_MIN_ENERGY = 25.0  # boost only above this energy
 ENGAGE_S = 5.0  # a mech that hit us or that we hit stays a target this long (protocol memory_s)
 STATE = ("stuck", "detour", "detour_sign", "detour_end", "free_n", "detour_at", "detour_lvl", "edge_sign", "edge_until", "dodge_sign",
          "dodge_t", "dodge_flip_t", "full_t", "lt_t", "lt_aim", "threat_yaw", "threat_t", "dmg_t", "retreating", "cover")
 SOUND_KINDS = ("gun", "laser", "laser_charge", "lightning", "mortar")
+
+# Decision numbers a trainer may set through params.json next to bot.py: name -> (module, constant, min, max).
+# Defaults are the constants as written. A missing, non-numeric, non-finite or out-of-range value keeps its default.
+PARAMS = {
+    "retreat_hp": ("bot", "RETREAT_HP", 0.0, 0.6),
+    "return_hp": ("bot", "RETURN_HP", 0.4, 1.0),
+    "threat_m": ("bot", "THREAT_M", 60.0, 280.0),
+    "hurt_hp": ("bot", "HURT_HP", 0.0, 0.8),
+    "hurt_near_m": ("bot", "HURT_NEAR_M", 0.0, 250.0),
+    "dodge_range_m": ("bot", "DODGE_RANGE_M", 0.0, 400.0),
+    "dodge_angle": ("bot", "DODGE_ANGLE", 0.0, 0.8),
+    "boost_min_energy": ("bot", "BOOST_MIN_ENERGY", 5.0, 90.0),
+    "detour_ticks": ("bot", "DETOUR_TICKS", 5, 60),
+    "chase_hp": ("chase", "CHASE_HP", 0.0, 1.01),
+    "chase_start_range": ("chase", "CHASE_START_RANGE", 50.0, 280.0),
+    "chase_hold_range": ("chase", "CHASE_HOLD_RANGE", 20.0, 150.0),
+    "grab_give_up_s": ("loot_mem", "GRAB_GIVE_UP_S", 5.0, 60.0),
+    "loot_cap_s": ("economy", "LOOT_CAP_S", 0.0, 15.0),
+    "rest_max_s": ("economy", "REST_MAX_S", 0.0, 10.0),
+    "gun_min_p": ("aim", "GUN_MIN_P", 0.1, 0.9),
+    "laser_release_p": ("aim", "LASER_RELEASE_P", 0.3, 0.95),
+}
+
+
+def _param_modules():
+    import sys
+    return {"bot": sys.modules[__name__], "chase": chaselib, "loot_mem": lootlib, "economy": economy, "aim": aimlib}
+
+
+DEFAULTS = {}  # name -> default, filled at import
+
+
+def apply_params(values):
+    """Set every PARAMS constant to values[name] when valid, else back to its default. Returns the names applied."""
+    mods = _param_modules()
+    if not DEFAULTS:
+        for name, (mod, attr, _, _) in PARAMS.items():
+            if mods[mod] is not None:
+                DEFAULTS[name] = getattr(mods[mod], attr)
+    values = values if isinstance(values, dict) else {}
+    applied = []
+    for name, (mod, attr, lo, hi) in PARAMS.items():
+        if name not in DEFAULTS:
+            continue
+        v, d = values.get(name), DEFAULTS[name]
+        ok = (isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and lo <= v <= hi
+              and (not isinstance(d, int) or v == int(v)))
+        setattr(mods[mod], attr, type(d)(v) if ok else d)
+        if ok:
+            applied.append(name)
+    if RETREAT_HP >= RETURN_HP:  # retreat must end above where it starts
+        globals()["RETREAT_HP"], globals()["RETURN_HP"] = DEFAULTS["retreat_hp"], DEFAULTS["return_hp"]
+        applied = [a for a in applied if a not in ("retreat_hp", "return_hp")]
+    return applied
+
+
+def load_params(path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "params.json")):
+    """apply_params from a JSON file; a missing or unreadable file means all defaults."""
+    try:
+        with open(path) as f:
+            values = json.load(f)
+    except (OSError, ValueError):
+        values = {}
+    return apply_params(values)
 
 
 def ang_diff(a, b):
@@ -727,8 +796,8 @@ class Bot:
                 grab = drop = goal = cp = None
             else:
                 self.retreating = False  # no cover in reach: fight on as before
-        if hp_frac < 0.45 and not flee and in_zone and not (fp and fp["reason"] == "chase"):
-            near = [unit(m["pos"][0] - x, m["pos"][1] - y) for m in mechs[:3] if math.dist(m["pos"][:2], (x, y)) < 120]
+        if hp_frac < HURT_HP and not flee and in_zone and not (fp and fp["reason"] == "chase"):
+            near = [unit(m["pos"][0] - x, m["pos"][1] - y) for m in mechs[:3] if math.dist(m["pos"][:2], (x, y)) < HURT_NEAR_M]
             for _ in range(4):  # hurt and fighting: still never walk at a near mech (no flee push); repeat for 2+
                 for tx_, ty_ in near:
                     comp = mx * tx_ + my * ty_
@@ -760,7 +829,7 @@ class Bot:
             if not self.lite and not urgent and not flee and m.get("charging") and m.get("aim"):
                 bx, by = x - m["pos"][0], y - m["pos"][1]
                 sd = math.hypot(bx, by)
-                if sd < 300 and abs(ang_diff(m["aim"][0], math.atan2(by, bx))) < 0.3:
+                if sd < DODGE_RANGE_M and abs(ang_diff(m["aim"][0], math.atan2(by, bx))) < DODGE_ANGLE:
                     ux, uy = unit(bx, by)
                     px, py = -uy, ux
                     if t - self.dodge_t > 1.5:  # a new charge: pick a side
@@ -770,7 +839,7 @@ class Bot:
                         self.dodge_sign, self.dodge_flip_t = -self.dodge_sign, t
                     self.dodge_t = t
                     mx, my = px * self.dodge_sign, py * self.dodge_sign
-                    dodging, dodge_boost = True, sd < 60
+                    dodging, dodge_boost = True, sd < DODGE_BOOST_M
                     break
         for p in obs.get("projectiles", []):
             if self.lite or p.get("kind") != "mortar" or not in_zone:
@@ -861,7 +930,7 @@ class Bot:
                     self.detour_sign = -1
                 else:
                     self.detour_sign = 1
-            self.detour = 25
+            self.detour = DETOUR_TICKS
         if self.detour > 0 and not (mx or my):  # holding still on purpose (drop ring): no detour
             self.detour = self.free_n = 0
         if self.detour > 0:
@@ -887,7 +956,7 @@ class Bot:
         if not hurry and n > 0:
             k = min(1.0, 4.5 / max(me["stats"].get("walk_speed", 11.7), 0.1))
             mx, my = mx * k, my * k
-        energy_ok = me["energy"] > 25 and me["grounded"] and n > 0
+        energy_ok = me["energy"] > BOOST_MIN_ENERGY and me["grounded"] and n > 0
         boost = bool(urgent and energy_ok) or bool(goal is not None and loot is None and in_zone and dgoal > 12 and energy_ok) \
             or bool(dodge_boost and energy_ok) or bool(cp is not None and cp["boost"] and energy_ok and self.stuck < 2
                  and mx * cp["move"][0] + my * cp["move"][1] > 0.9 * n)  # only while still heading at it
@@ -941,4 +1010,5 @@ class Bot:
 
 
 if __name__ == "__main__":
+    mf.log(f"params: {load_params()}")
     mf.run(Bot)

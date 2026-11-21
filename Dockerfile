@@ -1,5 +1,5 @@
 # ponytail: pinned by digest (python 3.13.18-slim); stdlib only, nothing to install
 FROM python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90
 WORKDIR /bot
-COPY mechfight.py bot.py aim.py ray.py fight.py chase.py economy.py loot_mem.py ./
+COPY mechfight.py bot.py aim.py ray.py fight.py chase.py economy.py loot_mem.py params.json ./
 ENTRYPOINT ["python3", "-u", "/bot/bot.py"]
