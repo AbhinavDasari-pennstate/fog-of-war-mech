@@ -1047,6 +1047,142 @@ class TestStateRestore(Base):
         self.assertEqual(bot.skip, {8})
 
 
+class TestRememberedFollowThrough(Base):
+    """A mech we hit (or that hit us) in the last 5 s stays a target out of view, up to the weapon's range."""
+    BUILDING = TestLineOfFire.BUILDING
+    bot_with = TestLineOfFire.bot_with
+    WE_HIT = [{"type": "hit", "target": 5, "amount": 315, "weapon": "laser"}]
+    HIT_US = [{"type": "damaged", "amount": 45, "weapon": "gun", "bearing": 0.0, "by": 5}]
+
+    def engage(self, bot, events):
+        bot.act(make_obs(t=30, mechs=[mech(5, (150, 0, 0))], weapons=[gun(), laser(cooldown=1.6)], events=events))
+
+    def step(self, bot, t, tick, pos, weapons, aim=None):
+        e = mech(5, pos)
+        obs = make_obs(t=t, tick=tick, weapons=weapons, mechs=[e])
+        self.assertFalse(bot.in_view(obs["self"], e))  # remembered, not seen
+        if aim is not None:
+            obs["self"]["aim"] = list(aim)
+        a = bot.act(obs)
+        self.assertEqual(problems(obs, a), [])
+        self.assertEqual(bot.errors, 0)
+        return a
+
+    def test_a_charges_holds_and_releases_on_a_mech_we_hit_at_241_m(self):
+        bot = self.bot_with()
+        self.engage(bot, self.WE_HIT)
+        a = self.step(bot, 31.6, 2, (241, 0, 0), [gun(), laser()])
+        self.assertTrue(a["fire"][1])  # new charge at a remembered mech we just hit
+        on = list(a["aim"])
+        self.assertLess(abs(on[0]), 0.03)
+        a = self.step(bot, 31.9, 3, (241, 0, 0), [gun(), laser(charge=0.3)], aim=on)
+        self.assertTrue(a["fire"][1])  # keeps charging
+        a = self.step(bot, 32.4, 4, (241, 0, 0), [gun(), laser(charge=0.75)], aim=on)
+        self.assertFalse(a["fire"][1])  # full and on target: released
+
+    def test_b_no_release_toward_a_remembered_mech_behind_a_building(self):
+        bot = self.bot_with(self.BUILDING)
+        self.engage(bot, self.WE_HIT)
+        aim = bot.direct_aim(make_obs()["self"], mech(5, (241, 0, 0)))[0]
+        a = self.step(bot, 31.6, 2, (241, 0, 0), [gun(), laser()], aim=aim)
+        self.assertFalse(a["fire"][1])  # no new charge into the wall
+        a = self.step(bot, 31.9, 3, (241, 0, 0), [gun(), laser(charge=0.75)], aim=aim)
+        self.assertTrue(a["fire"][1])  # a full charge is held, not let go into the wall
+
+    def test_c_no_new_charge_at_a_never_engaged_remembered_mech_at_230_m(self):
+        bot = self.bot_with()
+        bot.act(make_obs(t=30, mechs=[mech(5, (150, 0, 0))], weapons=[gun(), laser(cooldown=1.6)]))
+        a = self.step(bot, 31.6, 2, (230, 0, 0), [gun(), laser()])
+        self.assertFalse(a["fire"][1])
+
+    def test_engagement_expires_after_5_s(self):
+        bot = self.bot_with()
+        self.engage(bot, self.WE_HIT)
+        a = self.step(bot, 35.2, 2, (241, 0, 0), [gun(), laser()])
+        self.assertFalse(a["fire"][1])
+
+    def test_fallback_logic_also_charges_at_a_mech_we_hit(self):
+        bot = self.bot_with()
+        bot.aim_ok = False
+        self.engage(bot, self.WE_HIT)
+        self.assertTrue(self.step(bot, 31.6, 2, (241, 0, 0), [gun(), laser()])["fire"][1])
+        bot2 = self.bot_with()
+        bot2.aim_ok = False
+        bot2.act(make_obs(t=30, mechs=[mech(5, (150, 0, 0))], weapons=[gun(), laser(cooldown=1.6)]))
+        self.assertFalse(self.step(bot2, 31.6, 2, (230, 0, 0), [gun(), laser()])["fire"][1])
+
+    def test_gun_answers_a_remembered_attacker_only_with_a_clear_line(self):
+        # the gun keeps its 3 s return-fire window (TestGunGate); this pins the clear-path part out of view
+        for blocked in (False, True):
+            bot = self.bot_with(self.BUILDING) if blocked else self.bot_with()
+            self.engage(bot, self.HIT_US)
+            aim, _ = bot.lead_aim(make_obs()["self"], mech(5, (210, 0, 0)), 252)
+            a = self.step(bot, 32.0, 2, (210, 0, 0), [gun(), None], aim=aim)
+            self.assertEqual(a["fire"][0], not blocked)
+
+    def test_visible_healthy_mech_beats_a_remembered_wounded_one_behind_a_wall(self):
+        for far in ((120, 0, 0), (241, 0, 0)):
+            bot = self.bot_with(self.BUILDING)
+            self.engage(bot, self.WE_HIT)
+            hurt, seen = mech(5, far), mech(7, (0, 150, 0))
+            hurt["hp"] = 600
+            obs = make_obs(t=31, tick=2, weapons=[gun(), laser(cooldown=1.6)], mechs=[hurt, seen])
+            obs["self"]["aim"], _ = bot.lead_aim(obs["self"], seen, 252)
+            self.assertFalse(bot.in_view(obs["self"], hurt))
+            a = bot.act(obs)
+            self.assertEqual(bot.errors, 0)
+            self.assertLess(abs(a["aim"][0] - math.pi / 2), 0.05, far)  # stays on the mech we see
+            self.assertTrue(a["fire"][0], far)
+
+    def test_b_fallback_no_charge_into_a_wall_at_a_remembered_mech(self):
+        bot = self.bot_with(self.BUILDING)
+        bot.aim_ok = False
+        self.engage(bot, self.WE_HIT)
+        aim = bot.direct_aim(make_obs()["self"], mech(5, (241, 0, 0)))[0]
+        self.assertFalse(self.step(bot, 31.6, 2, (241, 0, 0), [gun(), laser()], aim=aim)["fire"][1])
+        clear = self.bot_with()
+        clear.aim_ok = False
+        self.engage(clear, self.WE_HIT)
+        self.assertTrue(self.step(clear, 31.6, 2, (241, 0, 0), [gun(), laser()], aim=aim)["fire"][1])
+
+    def test_lite_pass_does_not_charge_at_a_remembered_mech_through_a_wall(self):
+        class Flaky(Bot):
+            def _gate_fire(self, *args):
+                raise IndexError("gate")  # aim path fails: the lite pass runs _v3_fire with no ray test
+
+        bot = self.bot_with(self.BUILDING)
+        bot.__class__ = Flaky
+        bot.act(make_obs(t=30, mechs=[mech(5, (150, 0, 0))], weapons=[gun(), laser(cooldown=1.6)],
+                         events=self.WE_HIT))
+        e = mech(5, (241, 0, 0))
+        obs = make_obs(t=31.6, tick=2, weapons=[gun(), laser()], mechs=[e])
+        obs["self"]["aim"] = bot.direct_aim(obs["self"], e)[0]
+        self.assertFalse(bot.in_view(obs["self"], e))
+        a = bot.act(obs)
+        self.assertEqual(bot.errors, 2)  # both decisions went through the lite pass
+        self.assertFalse(a["fire"][1])
+
+    def test_hit_on_survives_a_degraded_pass_once(self):
+        class Flaky(Bot):
+            def _gate_fire(self, *args):
+                if not self.lite:
+                    raise IndexError("gate")
+                return Bot._gate_fire(self, *args)
+
+        bot = Flaky(HELLO)
+        bot.act(make_obs(t=30, mechs=[mech(5, (150, 0, 0))], events=self.WE_HIT))
+        self.assertEqual(bot.errors, 1)
+        self.assertEqual(bot.hit_on, {5: 30})
+        bot.act(make_obs(tick=2, t=30.5, mechs=[mech(5, (150, 0, 0))]))
+        self.assertEqual(bot.hit_on, {5: 30})  # no event: nothing new recorded
+
+    def test_gun_does_not_chase_a_remembered_mech_only_we_hit(self):
+        bot = self.bot_with()
+        self.engage(bot, self.WE_HIT)
+        aim, _ = bot.lead_aim(make_obs()["self"], mech(5, (210, 0, 0)), 252)
+        self.assertFalse(self.step(bot, 34.0, 2, (210, 0, 0), [gun(), None], aim=aim)["fire"][0])
+
+
 class TestLineOfFireCost(Base):
     def world_bot(self, cls=Bot):
         prisms = []

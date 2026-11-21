@@ -16,6 +16,7 @@ TAU = 2 * math.pi
 UPGRADE_PRIO = ["armor", "plating", "nanites", "sensors", "servos", "gun_damage", "gun_rate"]
 GRAB_KINDS = ("laser", "lightning")  # preference order; mortar is never picked up
 FREE_N = 20  # decisions of free movement that end a detour early
+ENGAGE_S = 5.0  # a mech that hit us or that we hit stays a target this long (protocol memory_s)
 STATE = ("stuck", "detour", "detour_sign", "detour_end", "free_n", "edge_sign", "edge_until", "dodge_sign",
          "dodge_t", "dodge_flip_t", "full_t", "lt_t", "lt_aim", "threat_yaw", "threat_t", "dmg_t")
 SOUND_KINDS = ("gun", "laser", "laser_charge", "lightning", "mortar")
@@ -93,6 +94,7 @@ class Bot:
         mf.log(f"map: prisms={len(self.prisms)} dir={hello.get('map', {}).get('dir')} ray={ray_n}")
         self.aim_errors = 0
         self.hit_by = {}        # attacker id (None: unknown) -> time of its last hit on us
+        self.hit_on = {}        # target id -> time of our last hit on it ("hit" events)
         self.stuck = 0          # decisions in a row we wanted to move but barely did
         self.detour = 0         # decisions left on a sideways detour
         self.detour_sign = 1
@@ -205,6 +207,17 @@ class Bot:
         return (self.in_view(me, m) or t - self.hit_by.get(m.get("id"), -99.0) < 3
                 or t - self.hit_by.get(None, -99.0) < 3)
 
+    def _fighting(self, m, t):
+        """It hit us, or we hit it, in the last 5 s (obs.mechs keeps listing it that long out of view)."""
+        tid = m.get("id")
+        return min(t - self.hit_by.get(tid, -99.0), t - self.hit_on.get(tid, -99.0)) < ENGAGE_S
+
+    def _follow_through(self, me, m, t, rng):
+        """A mech we are fighting, seen or only remembered, within rng and with a clear line from the muzzle."""
+        if self.lite or m is None or m.get("kind") != "mech" or not self._fighting(m, t):
+            return False  # lite pass: no ray test, so no shots at mechs we only remember
+        return math.dist(m["pos"][:3], me["pos"][:3]) <= rng and self.los_clear(me, m)
+
     def _aim_plan(self, obs, hitters, seen_mechs=None, mechs=None):
         """aim.decide for this observation, or None when it is unavailable or failed (v3 logic then runs).
 
@@ -264,8 +277,10 @@ class Bot:
                     fire[i] = False
                 elif (w.get("charge") or 0) > 0:
                     fire[i] = True  # already charging: the aim module holds or releases
-                else:  # a new charge only at a mech in view within 200 m
-                    fire[i] = in_view and d < 200 and target.get("kind") == "mech"
+                else:  # a new charge at a mech in view within 200 m, or one we are fighting within range
+                    rng = (w.get("stats") or {}).get("range", 280)
+                    fire[i] = ((in_view and d < 200 and target.get("kind") == "mech")
+                               or self._follow_through(me, target, t, rng))
         return fire
 
     def _v3_fire(self, me, t, target, mechs, flee, slot, gun, las, light, gun_i, las_i, light_i):
@@ -273,13 +288,14 @@ class Bot:
         x, y, z = me["pos"]
         fire = [False, False]
         aim_cmd = None
-        # laser: only at a mech in view now with a clear line, not while fleeing, inside ~200 m
+        # laser: at a mech in view within ~200 m, or one we are fighting within range; clear line, not fleeing
         lt, aim_l, dl = None, None, 0.0
         if las and not flee:
-            lrange = min(las.get("stats", {}).get("range", 280), 200)
+            lrange = las.get("stats", {}).get("range", 280)
             for m in mechs[:4]:  # nearest few only: each line of fire costs time
                 a_l, d_l = self.direct_aim(me, m)
-                if d_l < lrange and self.in_view(me, m) and self.los_clear(me, m):
+                if ((d_l < min(lrange, 200) and self.in_view(me, m) and self.los_clear(me, m))
+                        or self._follow_through(me, m, t, lrange)):
                     lt, aim_l, dl = m, a_l, d_l
                     break
         charge = las.get("charge", 0) if las else 0
@@ -399,7 +415,7 @@ class Bot:
         """One failing part must not cost the whole decision: retry without the map extras, then stand safe."""
         self.lite = False
         snap = {k: getattr(self, k) for k in STATE}
-        sets = (set(self.skip), dict(self.fails), dict(self.chase), dict(self.hit_by))
+        sets = (set(self.skip), dict(self.fails), dict(self.chase), dict(self.hit_by), dict(self.hit_on))
         try:
             return self._decide(obs)
         except Exception:
@@ -408,7 +424,7 @@ class Bot:
                 mf.log(f"decision degraded at tick {obs.get('tick')}: {traceback.format_exc()}")
         for k, v in snap.items():  # the failed pass must not leave its counters behind
             setattr(self, k, v)
-        self.skip, self.fails, self.chase, self.hit_by = sets
+        self.skip, self.fails, self.chase, self.hit_by, self.hit_on = sets
         self.lite = True
         try:
             return self._decide(obs)
@@ -447,6 +463,8 @@ class Bot:
                 self.hit_by[ev.get("by")] = t
                 if ev.get("bearing") is not None:
                     self.threat_yaw, self.threat_t = ev["bearing"], t
+            elif kind == "hit" and ev.get("target") is not None:
+                self.hit_on[ev["target"]] = t
             elif kind == "take_failed":
                 pid = ev.get("id")
                 self.fails[pid] = self.fails.get(pid, 0) + 1
