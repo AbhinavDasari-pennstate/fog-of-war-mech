@@ -496,6 +496,10 @@ def _send(msg: Dict[str, Any]) -> None:
 
 
 def _reader(q: "queue.Queue[Optional[str]]") -> None:
+    try:
+        sys.stdin.reconfigure(errors="replace")  # an undecodable line must not kill the reader
+    except (AttributeError, ValueError):
+        pass
     for line in sys.stdin:
         if line.strip():
             q.put(line)
@@ -510,6 +514,8 @@ def run(make_bot: Any) -> None:
     bot = None
     last: Dict[str, Any] = {}
     errors = 0
+    streak = 0      # consecutive failed decisions
+    coast_n = 10    # decisions to coast on the last move/aim/boost (bot.coast_s, 0.1 s each)
     while True:
         batch = [q.get()]
         while True:  # drain the queue: only the newest observation matters
@@ -525,9 +531,15 @@ def run(make_bot: Any) -> None:
                 msg = json.loads(raw)
             except ValueError:
                 continue
+            if not isinstance(msg, dict):  # a JSON line that is not an object
+                continue
             kind = msg.get("type")
             if kind == "hello":
                 draw.caps = msg.get("config", {}).get("debug", {})
+                try:
+                    coast_n = max(int(round(float(msg["config"]["bot"]["coast_s"]) * 10)), 0)
+                except (KeyError, TypeError, ValueError):
+                    coast_n = 10
                 try:
                     bot = make_bot(msg)
                 except Exception:
@@ -546,11 +558,15 @@ def run(make_bot: Any) -> None:
             try:
                 action = dict(bot.act(latest) or {})
                 last = {k: action[k] for k in _CONTINUOUS if k in action}
+                streak = 0
             except Exception:
                 errors += 1
+                streak += 1
                 if errors <= 5 or errors % 100 == 0:
                     log(f"act() failed at tick {latest['tick']} ({errors} so far):\n{traceback.format_exc()}")
                 action = dict(last)
+                if streak > coast_n:  # coasted long enough: stand still, keep the aim
+                    action.update(move=[0, 0], boost=False)
         action["tick"] = latest["tick"]
         d = draw.take()
         if d and "debug" not in action:
