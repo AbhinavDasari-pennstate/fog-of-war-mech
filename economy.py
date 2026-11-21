@@ -6,7 +6,8 @@ LOOT_RADIUS = 70.0     # m: farthest kill spot we walk to
 PILE_R = 10.0          # m: visible cubes this close to the kill spot belong to its pile
 SPOT_SEEN_S = 5.0      # s: the victim must have been seen this recently, else we do not know where it fell
 ARRIVE_M = 3.0         # m: at the spot (cube pickup reach is 3.5 m)
-REST_MAX_S = 8.0       # s: longest rest, kept short: it only exists to win the next duel; (regen needs 5 s without dealing or taking damage, then 45 HP/s)
+REST_MAX_S = 2.0       # s: longest fire hold after looting; the squad keeps sending hunters, so a long rest gives them free time
+                       # (regen starts 5 s after the kill shot, so this hold only overlaps regen after a long loot walk)
 REST_HP = 0.85         # rest ends at this HP fraction
 GUARD_M = 40.0         # m: no looting while any seen mech (line of fire or not) is this close to the pile
 NPC_CLEAR = 55.0       # m: no looting this close to a seen drone (drones shoot within 45 m, plus pickup reach)
@@ -81,8 +82,8 @@ if __name__ == "__main__":  # self-check
     o = obs(11.0, cubes=[(48, 1, 0), (90, 0, 0)])
     assert e.plan(o, False, True, [], 0, 0, 500, 0.5) == ("loot", (48, 1))           # pile cube, not the far one
     assert e.plan(obs(16.5), False, True, [], 0, 0, 500, 0.5) == ("rest", None)      # 6 s cap: rest
-    assert e.plan(obs(20.0), False, True, [], 0, 0, 500, 0.6) == ("rest", None)
-    assert e.plan(obs(29.0), False, True, [], 0, 0, 500, 0.6) == (None, None)        # 12 s rest cap
+    assert e.plan(obs(18.0), False, True, [], 0, 0, 500, 0.6) == ("rest", None)
+    assert e.plan(obs(18.6), False, True, [], 0, 0, 500, 0.6) == (None, None)        # 2 s rest cap
     e.update(obs(30.0, mechs=[{"id": 4, "kind": "mech", "pos": [0, 40, 0]}]))
     e.update(obs(30.1, events=[{"type": "kill", "target": 4}]))
     assert e.plan(obs(30.2), True, True, [], 0, 0, 500, 0.5) == (None, None)         # contact aborts

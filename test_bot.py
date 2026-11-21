@@ -633,6 +633,14 @@ class TestKillLoot(Base):
         a = self.act(make_obs(t=30.4, tick=5, hp=900, mechs=[drone], events=hit))  # hit: contact ends the rest
         self.assertIsNone(self.bot.eco.phase)
 
+    def test_rest_is_capped_at_two_seconds(self):
+        self.kill(pos=(0, 2, 0))  # at the spot: rest starts on the next decision
+        self.act(make_obs(t=30.2, tick=3, hp=900))
+        self.act(make_obs(t=31.7, tick=4, hp=900))
+        self.assertEqual(self.bot.eco.phase, "rest")
+        self.act(make_obs(t=32.4, tick=5, hp=900))
+        self.assertIsNone(self.bot.eco.phase)
+
     def test_rest_ends_at_85_percent(self):
         self.kill(pos=(0, 2, 0))
         self.act(make_obs(t=30.2, tick=3, hp=900))
