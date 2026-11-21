@@ -444,13 +444,15 @@ class Bot:
         self.chase.setdefault(best["id"], t)  # first time we went for it; kept if it leaves view
         return best
 
-    def cover_spot(self, t, x, y, z, threats):
-        """(x, y) if no threat sees us here, else the nearest spot within COVER_RINGS that none can see and that we
-        can walk straight to, else None. A found spot is kept COVER_RECHECK_S while it stays hidden."""
-        def hidden(px, py):
-            c = (px, py, z + 4.5)
-            return all(not raylib.clear((m["pos"][0], m["pos"][1], m["pos"][2] + 8.0), c) for m in threats)
-        if hidden(x, y):
+    def cover_spot(self, t, x, y, z, threats, ccx, ccy, cr):
+        """(x, y) if no threat sees us here, else the nearest spot within COVER_RINGS that none can see, that we can
+        walk straight to on about our level and that is inside the zone's cr - 25 line, else None. A found spot is
+        kept COVER_RECHECK_S while it stays hidden."""
+        def hidden(px, py, gz=None):  # no threat eye sees our centre or top, no muzzle has a line to our upper body
+            gz = raylib.ground(px, py) if gz is None else gz
+            return all(not raylib.clear((m["pos"][0], m["pos"][1], m["pos"][2] + h0), (px, py, gz + h1))
+                       for m in threats for h0, h1 in ((8.0, 4.5), (8.0, 9.0), (7.0, 6.5), (7.0, 8.0)))
+        if hidden(x, y, z):
             return (x, y)
         c = self.cover
         if c is not None and t - c[2] < COVER_RECHECK_S:
@@ -467,6 +469,8 @@ class Bot:
                     return None
                 ang = k * TAU / COVER_DIRS
                 px, py = x + r * math.cos(ang), y + r * math.sin(ang)
+                if math.hypot(px - ccx, py - ccy) > cr - 25 or abs(raylib.ground(px, py) - z) > 3.0:
+                    continue  # never hide where the zone turns us urgent, nor on another level
                 if hidden(px, py) and runs.setdefault(k, self.free_run(x, y, z, ang, COVER_RINGS[-1] + 3)) >= r:
                     self.cover = (px, py, t)
                     return (px, py)
@@ -709,10 +713,13 @@ class Bot:
             self.retreating = True
         cornered = any(math.dist(m["pos"][:2], (x, y)) < CORNER_M for m in threats)
         if self.retreating and not cornered:
-            spot = self.cover_spot(t, x, y, z, threats)
+            spot = self.cover_spot(t, x, y, z, threats, ccx, ccy, cr)
             if spot == (x, y):
                 mx = my = 0.0
-                rest = True  # hidden: no shots, so regen can start
+                finish = any(m.get("hp") is not None and m["hp"] < 0.15 * (m.get("max_hp") or 1400)
+                             and self.los_clear(me, m) for m in threats)
+                rest = t - self.dmg_t >= 1.0 and not finish  # hidden: no shots so regen starts; hit anyway or a kill
+                #                                              shot on a nearly dead mech: shoot
             elif spot is not None:
                 mx, my = unit(spot[0] - x, spot[1] - y)
                 grab = drop = goal = cp = None

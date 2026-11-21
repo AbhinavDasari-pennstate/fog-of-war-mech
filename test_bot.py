@@ -1004,19 +1004,38 @@ class TestLineOfFire(Base):
         self.assertLess(a["move"][1], -0.5)  # down toward the building's shadow
         self.assertGreater(bot.act(self.retreat_obs((30, 40, 0), 1400, tick=2))["move"][1], -0.5)  # healthy: no
 
-    def test_hidden_and_hurt_holds_still_without_firing_until_80_percent(self):
-        low_wall = {"kind": "building", "base": -10, "top": 6, "ring": [33, -20, 36, -20, 36, 20, 33, 20]}
-        bot = self.bot_with(low_wall)  # it cannot see our body behind the wall; our muzzle clears it
-        self.assertTrue(self.shoot(bot, (100, 0, 0))["fire"][0])  # healthy: we shoot over it
-        bot = self.bot_with(low_wall)
-        a = bot.act(self.retreat_obs((30, 0, 0), 300))
+    def test_hidden_and_hurt_holds_fire_until_80_percent_unless_hit_or_finishing(self):
+        def bot_and_obs(hp, enemy_hp=1400, events=()):
+            e = dict(mech(5, (100, 0, 0)), hp=enemy_hp)
+            o = make_obs(hp=hp, weapons=[gun(), None], mechs=[e], events=list(events))
+            o["self"]["aim"], _ = bot.lead_aim(o["self"], e, 252)
+            return o
+        bot = self.bot_with()  # open ground: our gun has a clear line; cover_spot says "hidden here"
+        bot.cover_spot = lambda t, x, y, *a: (x, y)
+        a = bot.act(bot_and_obs(300))
         self.assertEqual(a["move"], [0.0, 0.0])
         self.assertEqual(a["fire"], [False, False])
-        a = bot.act(self.retreat_obs((30, 0, 0), 1000, tick=2))  # 71%: still resting
+        a = bot.act(dict(bot_and_obs(1000), tick=2))  # 71%: still resting
         self.assertEqual(a["fire"], [False, False])
         self.assertTrue(bot.retreating)
-        bot.act(self.retreat_obs((30, 0, 0), 1150, tick=3))  # 82%: fight again
+        hit = [{"type": "damaged", "amount": 45, "weapon": "gun", "bearing": 0.0, "by": 9}]
+        self.assertTrue(bot.act(dict(bot_and_obs(1000, events=hit), tick=3))["fire"][0])  # hit while hiding: shoot
+        bot.act(dict(bot_and_obs(1150), t=40.0, tick=4))  # 82%: fight again
         self.assertFalse(bot.retreating)
+        bot = self.bot_with()
+        bot.cover_spot = lambda t, x, y, *a: (x, y)
+        self.assertTrue(bot.act(bot_and_obs(300, enemy_hp=150))["fire"][0])  # nearly dead and in line: finish it
+
+    def test_a_wall_that_hides_our_centre_but_not_our_top_is_not_cover(self):
+        low_wall = {"kind": "building", "base": -10, "top": 6, "ring": [33, -20, 36, -20, 36, 20, 33, 20]}
+        threat = [mech(5, (100, 0, 0))]
+        self.assertNotEqual(self.bot_with(low_wall).cover_spot(0.0, 30, 0, 0.0, threat, 0, 0, 1e9), (30, 0))
+        self.assertEqual(self.bot_with(self.BUILDING).cover_spot(0.0, 30, 0, 0.0, threat, 0, 0, 1e9), (30, 0))
+
+    def test_no_cover_spot_past_the_zone_edge_line(self):
+        threat = [mech(5, (100, 0, 0))]
+        self.assertIsNotNone(self.bot_with(self.BUILDING).cover_spot(0.0, 30, 40, 0.0, threat, 0, 0, 1e9))
+        self.assertIsNone(self.bot_with(self.BUILDING).cover_spot(0.0, 30, 40, 0.0, threat, 30, 40, 28))
 
     def test_no_hiding_when_cornered_or_outside_the_zone(self):
         bot = self.bot_with(self.BUILDING)
