@@ -18,6 +18,10 @@ try:
     import chase as chaselib
 except Exception:  # chase module missing or broken: no chasing
     chaselib = None
+try:
+    import economy
+except Exception:  # economy module missing or broken: no looting
+    economy = None
 
 TAU = 2 * math.pi
 # upgrade preference order: the first id present in an offer is picked
@@ -129,6 +133,7 @@ class Bot:
         self.fight_errors = 0
         self.chaser = chaselib.Chase() if chaselib is not None else None
         self.chase_errors = 0
+        self.eco = economy.Economy() if economy is not None else None
 
     def pick_upgrade(self, offer):
         ids = [ch["id"] for ch in offer["choices"]]
@@ -523,6 +528,12 @@ class Bot:
                 self.fails[pid] = self.fails.get(pid, 0) + 1
                 if ev.get("reason") == "gone" or self.fails[pid] >= 3:
                     self.skip.add(pid)
+        if self.eco is not None and not self.lite:
+            try:
+                self.eco.update(obs)
+            except Exception:
+                self.eco = None
+                mf.log(f"economy failed, looting off: {traceback.format_exc()}")
         hit_recent = t - self.dmg_t < 4  # a recent hit bearing wins over what we hear
         if not hit_recent:
             heard = [s for s in obs.get("sounds", []) if s.get("kind") in SOUND_KINDS and s.get("dist") != "far"]
@@ -565,7 +576,22 @@ class Bot:
         # ---- goal: a laser (else lightning), else a supply drop; beats zone positioning unless outside the zone ----
         grab = self.pick_grab(obs, me, ccx, ccy, cr, t, grab_kinds) if want_weapon else None
         drop = None if grab is not None else self.pick_drop(obs, me, mechs, ccx, ccy, cr)
+        # ---- after a kill: walk to its pile (economy.py), then rest without firing so regen starts ----
+        loot, rest = None, False
+        if self.eco is not None and not self.lite and self.eco.phase is not None:
+            try:  # contact: hit since the kill (the victim's own hits do not count), or a mech in view with a clear line
+                seen_now = [m for m in mechs if self.in_view(me, m)][:4]  # nearest few: each line of fire costs time
+                contact = (self.dmg_t > self.eco.kill_t and t - self.dmg_t < 3) or any(self.los_clear(me, m) for m in seen_now)
+                can_loot = grab is None and drop is None and not urgent and hp_frac >= 0.45
+                mode, loot = self.eco.plan(obs, contact, can_loot, npcs, ccx, ccy, cr, hp_frac, mechs)
+                rest = mode == "rest" and in_zone  # no regen outside the zone
+            except Exception:
+                loot, rest = None, False
+                self.eco = None
+                mf.log(f"economy failed, looting off: {traceback.format_exc()}")
         goal, dgoal = None, 0.0
+        if loot is not None:
+            goal, dgoal = (loot[0], loot[1], z), math.hypot(loot[0] - x, loot[1] - y)
         if grab is not None:
             goal, dgoal = grab["pos"], math.dist(grab["pos"][:2], (x, y))
         elif drop is not None:
@@ -744,7 +770,7 @@ class Bot:
             k = min(1.0, 4.5 / max(me["stats"].get("walk_speed", 11.7), 0.1))
             mx, my = mx * k, my * k
         energy_ok = me["energy"] > 25 and me["grounded"] and n > 0
-        boost = bool(urgent and energy_ok) or bool(goal is not None and in_zone and dgoal > 12 and energy_ok) \
+        boost = bool(urgent and energy_ok) or bool(goal is not None and loot is None and in_zone and dgoal > 12 and energy_ok) \
             or bool(dodge_boost and energy_ok) or bool(cp is not None and cp["boost"] and energy_ok and self.stuck < 2)
         act.update(move=[mx, my], boost=boost or jet, jump=jump)
 
@@ -787,6 +813,8 @@ class Bot:
                 reload_cmd = True
         if reload_cmd:
             act["reload"] = True
+        if rest:  # dealing damage restarts the regen delay; a charging laser keeps its trigger (letting go fires it)
+            fire = [f and bool(w and w.get("kind") == "laser" and (w.get("charge") or 0) > 0) for f, w in zip(fire, ws)]
         act["fire"] = fire
 
         mf.draw.label(f"hp {me['hp']:.0f} z{dz:.0f}/{safe_r:.0f}{' FLEE' if flee else ''}{' HIDE' if hiding else ''}{' GRAB' if grab else ''}{' CHASE' if cp else ''}")

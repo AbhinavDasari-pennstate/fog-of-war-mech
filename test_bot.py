@@ -586,6 +586,66 @@ class TestUpgrades(Base):
         self.assertNotIn("pick", self.act(make_obs()))
 
 
+
+class TestKillLoot(Base):
+    """economy.py hook: after a kill walk to its pile, then rest without firing."""
+
+    def kill(self, pos=(0, 50, 0)):
+        self.act(make_obs(t=30, tick=1, mechs=[mech(5, pos)]))
+        return self.act(make_obs(t=30.1, tick=2, hp=900, events=[{"type": "kill", "target": 5}]))
+
+    def test_walks_to_kill_spot_after_kill(self):
+        a = self.kill()
+        self.assertGreater(a["move"][1], 0.9)
+        self.assertFalse(a["boost"])  # boosting is loud: walk to loot
+
+    def test_victims_last_hit_does_not_cancel_loot(self):
+        self.act(make_obs(t=29.5, tick=1, mechs=[mech(5, (0, 50, 0))],
+                          events=[{"type": "damaged", "amount": 45, "weapon": "gun", "bearing": 1.57, "by": 5}]))
+        a = self.act(make_obs(t=30.1, tick=2, hp=900, events=[{"type": "kill", "target": 5}]))
+        self.assertEqual(self.bot.eco.phase, "loot")
+        self.assertGreater(a["move"][1], 0.9)
+
+    def test_rest_keeps_a_charging_laser(self):
+        self.kill(pos=(0, 2, 0))
+        self.bot._aim_plan = lambda *a, **k: {"aim": [0.0, 0.0], "fire": [True, True], "target": None, "reload": False}
+        self.bot._gate_fire = lambda raw, *a, **k: list(raw)
+        a = self.act(make_obs(t=30.2, tick=3, hp=900, weapons=[gun(), laser(charge=0.4)]))
+        self.assertEqual(self.bot.eco.phase, "rest")
+        self.assertEqual(a["fire"], [False, True])  # gun held, charging laser keeps its trigger
+        a = self.act(make_obs(t=30.3, tick=4, hp=900, weapons=[gun(), laser(charge=0.0)]))
+        self.assertEqual(a["fire"], [False, False])  # no new charge while resting
+
+    def test_contact_aborts_loot(self):
+        self.kill()
+        a = self.act(make_obs(t=30.2, tick=3, hp=900, aim=(-math.pi / 2, 0), mechs=[mech(6, (0, -100, 0))]))
+        self.assertIsNone(self.bot.eco.phase)
+        self.assertLess(a["move"][1], 0.5)
+
+    def test_rest_holds_fire_and_a_hit_ends_it(self):
+        self.kill(pos=(0, 2, 0))  # already at the spot: straight to rest
+        drone = mech(104, (0, 30, 0), kind="npc")
+        hit = [{"type": "damaged", "amount": 25, "weapon": "npc", "bearing": 1.57, "by": 104}]
+        self.act(make_obs(t=30.2, tick=3, hp=900, weapons=[gun(), None]))
+        self.assertEqual(self.bot.eco.phase, "rest")
+        a = self.act(make_obs(t=30.3, tick=4, hp=900, weapons=[gun(), None]))
+        self.assertEqual(a["fire"], [False, False])
+        a = self.act(make_obs(t=30.4, tick=5, hp=900, mechs=[drone], events=hit))  # hit: contact ends the rest
+        self.assertIsNone(self.bot.eco.phase)
+
+    def test_rest_ends_at_85_percent(self):
+        self.kill(pos=(0, 2, 0))
+        self.act(make_obs(t=30.2, tick=3, hp=900))
+        self.act(make_obs(t=31, tick=4, hp=1200))
+        self.assertIsNone(self.bot.eco.phase)
+
+    def test_broken_economy_turns_looting_off(self):
+        self.bot.eco.update = None  # calling it raises TypeError
+        a = self.act(make_obs(t=30, cubes=[{"id": 5001, "pos": [0, 60, 0]}]))
+        self.assertIsNone(self.bot.eco)
+        self.assertEqual(problems(make_obs(t=30), a), [])
+
+
 class TestEdgeCases(Base):
     def test_empty_everything(self):
         a = self.act(make_obs(weapons=[gun(), None]))
@@ -1714,7 +1774,7 @@ class TestMainEntrypoint(unittest.TestCase):
         self.assertIn('ENTRYPOINT ["python3", "-u", "/bot/bot.py"]', text)
         copy_lines = [l for l in text.splitlines() if l.startswith("COPY ")]
         self.assertEqual(len(copy_lines), 1)
-        for name in ("mechfight.py", "bot.py", "aim.py", "ray.py", "fight.py", "chase.py"):
+        for name in ("mechfight.py", "bot.py", "aim.py", "ray.py", "fight.py", "chase.py", "economy.py"):
             self.assertIn(name, copy_lines[0].split())
         with open(os.path.join(HERE, "bot.py")) as f:
             self.assertIn('if __name__ == "__main__":', f.read())
