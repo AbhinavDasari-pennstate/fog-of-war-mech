@@ -589,14 +589,34 @@ class TestUpgrades(Base):
     def choices(self, *ids):
         return {"id": 1, "expires": 99, "choices": [{"id": i, "name": i, "desc": ""} for i in ids]}
 
-    def test_priority_armor_plating_nanites_then_rest(self):
-        pairs = [(("plating", "armor", "sensors"), 1), (("sensors", "plating", "nanites"), 1),
-                 (("sensors", "gun_rate", "nanites"), 2), (("gun_rate", "servos", "sensors"), 2),
-                 (("gun_rate", "gun_damage", "servos"), 2), (("gun_rate", "gun_damage", "jets"), 1),
-                 (("jets", "reactor", "capacitor"), 0), (("armor", "plating", "nanites"), 0)]
+    def test_priority_plating_laser_damage_armor_then_rest(self):
+        pairs = [(("armor", "plating", "sensors"), 1), (("armor", "laser_damage", "plating"), 2),
+                 (("armor", "laser_damage", "nanites"), 1), (("nanites", "armor", "servos"), 1),
+                 (("sensors", "gun_rate", "nanites"), 2), (("gun_damage", "gun_rate", "servos"), 0),
+                 (("laser_charge", "gun_damage", "jets"), 0), (("jets", "reactor", "capacitor"), 2),
+                 (("gun_rate", "gun_damage", "gun_mag"), 2), (("armor", "gun_mag", "nanites"), 1),
+                 (("gyros", "servos", "sensors"), 2),
+                 (("mortar_splash", "mortar_reload", "jets"), 2), (("mortar_splash", "mortar_reload"), 0)]
         for ids, idx in pairs:
             a = self.act(make_obs(offer=self.choices(*ids)))
             self.assertEqual(a["pick"], idx, ids)
+
+    def test_every_config_upgrade_is_ranked_or_a_mortar(self):
+        from bot import UPGRADE_PRIO
+        ids = ["plating", "armor", "servos", "capacitor", "reactor", "jets", "nanites", "gyros", "sensors",  # hello.config
+               "gun_damage", "gun_rate", "gun_velocity", "gun_mag", "mortar_splash", "mortar_reload", "mortar_velocity",
+               "laser_charge", "laser_damage", "laser_pierce", "lightning_chain", "lightning_range", "lightning_efficiency"]
+        self.assertEqual(len(set(UPGRADE_PRIO)), len(UPGRADE_PRIO))
+        for u in ids:
+            self.assertTrue(u in UPGRADE_PRIO or u.startswith("mortar"), u)
+
+    def test_empty_or_odd_offer_never_breaks_the_decision(self):
+        for off in ({"id": 1, "expires": 5, "choices": []}, {"id": 1, "expires": 5},
+                    {"id": 1, "expires": 5, "choices": [{"name": "x"}, {"id": "plating"}]}):
+            a = self.act(make_obs(offer=off))
+            self.assertEqual(problems(make_obs(offer=off), a), [])
+        a = self.act(make_obs(offer={"id": 1, "expires": 5, "choices": [{"name": "x"}, {"id": "plating"}]}))
+        self.assertEqual(a["pick"], 1)
 
     def test_no_offer_no_pick(self):
         self.assertNotIn("pick", self.act(make_obs()))
@@ -696,7 +716,7 @@ class TestEdgeCases(Base):
     def test_offer_present_with_enemies(self):
         offer = {"id": 1, "expires": 99, "choices": [{"id": "armor"}, {"id": "plating"}, {"id": "sensors"}]}
         a = self.act(make_obs(offer=offer, mechs=[mech(5, (100, 0, 0))]))
-        self.assertEqual(a["pick"], 0)
+        self.assertEqual(a["pick"], 1)
 
     def test_stuck_triggers_detour_and_jump(self):
         bot = Bot(HELLO)

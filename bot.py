@@ -28,8 +28,14 @@ except Exception:  # economy module missing or broken: no looting
     economy = None
 
 TAU = 2 * math.pi
-# upgrade preference order: the first id present in an offer is picked
-UPGRADE_PRIO = ["armor", "plating", "nanites", "sensors", "servos", "gun_damage", "gun_rate"]
+# upgrade preference order (ids from hello.config): the first id present in an offer is picked. Per pick: plating
+# +15% effective HP; laser_damage +18% laser, about +11% total DPS (laser about 65% of our damage); gun_mag 102 -> 134
+# gun dps (+31% gun, about +11% total); armor +8.7 to 10.5% effective HP; nanites 45 -> 72 HP/s regen 1.5 s sooner;
+# then laser_charge (+8.5% laser), gun_damage (+15% gun), gun_rate (+7.7% gun: the reload is unchanged).
+# Replay winners and top killers buy plating, armor and laser_damage.
+UPGRADE_PRIO = ["plating", "laser_damage", "gun_mag", "armor", "nanites", "lightning_efficiency", "laser_charge",
+                "gun_damage", "gun_rate", "sensors", "servos", "gyros", "capacitor", "reactor", "jets",
+                "gun_velocity", "lightning_range", "lightning_chain", "laser_pierce"]
 GRAB_KINDS = ("laser", "lightning")  # preference order; mortar is never picked up
 FREE_N = 20  # decisions of free movement that end a detour early
 ENGAGE_S = 5.0  # a mech that hit us or that we hit stays a target this long (protocol memory_s)
@@ -143,7 +149,7 @@ class Bot:
         self.eco = economy.Economy() if economy is not None else None
 
     def pick_upgrade(self, offer):
-        ids = [ch["id"] for ch in offer["choices"]]
+        ids = [ch.get("id") for ch in offer.get("choices") or [] if isinstance(ch, dict)]
         for key in UPGRADE_PRIO:
             if key in ids:
                 return ids.index(key)
@@ -531,7 +537,8 @@ class Bot:
         t = obs["t"]
         act: mf.Action = {"tick": obs["tick"]}
         if obs.get("offer"):
-            act["pick"] = self.pick_upgrade(obs["offer"])
+            if [ch for ch in obs["offer"].get("choices") or [] if isinstance(ch, dict)]:  # an empty offer gets no pick
+                act["pick"] = self.pick_upgrade(obs["offer"])
 
         for ev in obs.get("events", []):
             kind = ev.get("type")
