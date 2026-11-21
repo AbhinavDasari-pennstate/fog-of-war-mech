@@ -26,10 +26,6 @@ try:
     import economy
 except Exception:  # economy module missing or broken: no looting
     economy = None
-try:
-    import shotline as shotlib
-except Exception:  # module missing or broken: blocked shots are left to v3
-    shotlib = None
 
 TAU = 2 * math.pi
 # upgrade preference order (ids from hello.config): the first id present in an offer is picked. Per pick: plating
@@ -149,9 +145,6 @@ class Bot:
         self.loot_errors = 0
         self.fight_errors = 0
         self.chaser = chaselib.Chase() if chaselib is not None else None
-        self.shot = shotlib.ShotLine() if shotlib is not None else None  # peek, else hold, on a blocked line
-        self.shot_errors = 0
-        self.shot_log = (None, -99.0)
         self.chase_errors = 0
         self.eco = economy.Economy() if economy is not None else None
 
@@ -858,31 +851,6 @@ class Bot:
             ax, ay, az = cp["aim_at"]  # track dropped: look where it was going
             aim_cmd = [math.atan2(ay - y, ax - x),
                        math.atan2(az - z - me["stats"].get("muzzle_height", 7), max(math.hypot(ax - x, ay - y), 1.0))]
-        # ---- a tracked target behind cover: peek, else hold (shotline.py); the zone, flee, hiding, a chase, a dodge,
-        # a drop capture, a walk to a weapon, and economy's loot walk or rest all win over it ----
-        sp = None
-        if self.shot is not None and not self.lite and raylib is not None and self.shot_errors == 0:
-            if urgent or flee or hiding or cp is not None or dodging or capturing or grab is not None                     or loot is not None or rest:
-                self.shot.reset()
-            else:
-                try:
-                    st_ = target if target is not None and target.get("kind") == "mech" else (mechs[0] if mechs else None)
-                    sp = self.shot.step(t, me, st_, [m for m in mechs if m is not st_], raylib.clear, raylib.ground)
-                except Exception:
-                    self.shot_errors += 1
-                    mf.log(f"shotline failed, off from now on: {traceback.format_exc()}")
-                    sp = None
-        if sp is not None:
-            if sp["move"] is not None:  # hold keeps the bot's own move (zone walk, dodges, goals)
-                act["move"] = [float(sp["move"][0]), float(sp["move"][1])]
-            if sp["aim"] is not None:
-                aim_cmd = sp["aim"]
-            if sp["gun_quiet"] and gun is not None:
-                fire[gun_i] = False  # holding behind the corner: the gun would only hit the wall
-            key = (sp["opt"], sp["note"].split(" ")[0])
-            if key != self.shot_log[0] or t - self.shot_log[1] >= 2.0:  # stderr: which option, when it changes
-                mf.log(f"t={t:.1f} {sp['log']}")
-                self.shot_log = (key, t)
         if aim_cmd is None:
             aim_cmd = self._idle_aim(me, t, hit_recent, empty, grab, mx, my, n)
         act["aim"] = [float(aim_cmd[0]), float(aim_cmd[1])]
