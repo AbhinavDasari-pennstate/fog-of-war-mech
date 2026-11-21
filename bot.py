@@ -605,7 +605,9 @@ class Bot:
         seen_obs = obs  # pickups seen in the last loot_mem.LOOT_MEM_S, not only the ones in view now
         if self.loot is not None and not self.lite and lootlib.LOOT_MEM_S > 0 and self.loot_errors == 0:
             try:
-                self.loot.update(obs, me, self.vis_near)
+                eye = (x, y, z + me["stats"].get("eye_height", 8))
+                self.loot.update(obs, me, self.vis_near, lambda p: self.in_view(me, p) and (
+                    raylib is None or raylib.clear(eye, (p["pos"][0], p["pos"][1], p["pos"][2] + 1.0))))
                 seen_obs = dict(obs, pickups=self.loot.pickups())
             except Exception:
                 self.loot_errors += 1  # broken once: obs pickups only for the rest of the match

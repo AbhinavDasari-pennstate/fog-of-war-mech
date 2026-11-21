@@ -13,9 +13,12 @@ class LootMemory:
     def __init__(self):
         self.seen = {}  # pickup id -> (pickup dict, t last seen)
 
-    def update(self, obs, me, near_r):
-        """Record this observation's pickups; drop old ones and ones gone from where we would see them."""
+    def update(self, obs, me, near_r, visible=None):
+        """Record this observation's pickups; drop old ones and ones gone from where we would see them.
+        visible(p) -> True when p's spot is in our view cone with a clear line (unlisted there = taken)."""
         t = obs.get("t", 0.0)
+        if not math.isfinite(t):
+            return
         now = set()
         for p in obs.get("pickups") or []:
             pid = p.get("id")
@@ -28,7 +31,8 @@ class LootMemory:
         for pid, (p, ts) in list(self.seen.items()):
             if pid in now:
                 continue
-            if t - ts > LOOT_MEM_S or t < ts or math.hypot(p["pos"][0] - x, p["pos"][1] - y) < near_r - 5:
+            if (t - ts > LOOT_MEM_S or t < ts or math.hypot(p["pos"][0] - x, p["pos"][1] - y) < near_r - 5
+                    or (visible is not None and visible(p))):
                 del self.seen[pid]
 
     def pickups(self):

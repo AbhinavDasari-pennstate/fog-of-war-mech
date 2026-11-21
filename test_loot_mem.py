@@ -38,6 +38,19 @@ class TestMemory(unittest.TestCase):
         m.update({"t": 5.0, "pickups": []}, self.me(70, 0), 45)  # 30 m away, inside near range: gone
         self.assertEqual(m.pickups(), [])
 
+    def test_forgets_one_whose_spot_we_see_empty(self):
+        m = loot_mem.LootMemory()
+        m.update({"t": 1.0, "pickups": [pickup(7, "laser", (100, 0, 0))]}, self.me(), 45)
+        m.update({"t": 2.0, "pickups": []}, self.me(), 45, visible=lambda p: False)  # looking away: kept
+        self.assertEqual(len(m.pickups()), 1)
+        m.update({"t": 3.0, "pickups": []}, self.me(), 45, visible=lambda p: True)  # spot in view, empty: taken
+        self.assertEqual(m.pickups(), [])
+
+    def test_nan_time_is_ignored(self):
+        m = loot_mem.LootMemory()
+        m.update({"t": float("nan"), "pickups": [pickup(7, "laser", (100, 0, 0))]}, self.me(), 45)
+        self.assertEqual(m.pickups(), [])
+
     def test_ignores_bad_pickups_and_time_going_back(self):
         m = loot_mem.LootMemory()
         bad = [{"id": None, "kind": "laser", "pos": [1, 2, 3]}, {"id": 2, "kind": "laser", "pos": [float("nan"), 0, 0]},
@@ -56,6 +69,13 @@ class TestBotHook(unittest.TestCase):
         a = bot.act(make_obs(t=3.0, tick=2, pos=(0, 30, 0), mechs=[mech(5, (150, 30, 0))], zone=ZONE))
         self.assertEqual(bot.errors, 0)
         self.assertGreater(a["move"][1], 0.9)
+
+    def test_bot_forgets_a_laser_it_sees_is_gone(self):
+        bot = Bot(HELLO)
+        bot.act(make_obs(t=0.0, pickups=[pickup(1, "laser", (100, 0, 0))], zone=ZONE))
+        a = bot.act(make_obs(t=6.0, tick=2, aim=(0.0, 0.0), zone=ZONE))  # aimed at the spot, nothing listed
+        self.assertEqual(bot.loot.seen, {})
+        self.assertLess(abs(a["move"][0]), 0.9)
 
     def test_off_means_obs_only(self):
         loot_mem.LOOT_MEM_S, saved = 0.0, loot_mem.LOOT_MEM_S

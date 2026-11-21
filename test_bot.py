@@ -244,7 +244,7 @@ class TestWeaponGrab(Base):
         self.addCleanup(setattr, botmod.lootlib, "GRAB_GIVE_UP_S", saved)
         pk = [pickup(1, "laser", (60, 0, 0))]
         self.act(make_obs(t=3, pickups=pk, zone=self.ZONE))
-        a = self.act(make_obs(t=9, tick=2, pickups=[], zone=self.ZONE))  # out of view: remembered (loot_mem)
+        a = self.act(make_obs(t=9, tick=2, pickups=[], aim=(math.pi, 0.0), zone=self.ZONE))  # looking away: remembered
         self.assertGreater(a["move"][0], 0.9)
         a = self.act(make_obs(t=12, tick=3, pickups=pk, zone=self.ZONE))  # back, 9 s in: still chased
         self.assertGreater(a["move"][0], 0.9)
