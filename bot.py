@@ -810,7 +810,8 @@ class Bot:
                 self.detour -= 1
                 if self.detour == 0:
                     self.detour_end = t
-                a = math.atan2(my, mx) + self.detour_sign * DETOUR_ANGLES[self.detour_lvl]
+                wide = in_zone and not urgent and not dodging  # never swing wide (backwards) out of the zone or mid-dodge
+                a = math.atan2(my, mx) + self.detour_sign * DETOUR_ANGLES[self.detour_lvl if wide else 0]
                 mx, my = math.cos(a), math.sin(a)
         jump = self.stuck >= 3 and me["energy"] > 30
         jet = (not me["grounded"]) and me["vel"][2] < 4 and want and self.detour > 0

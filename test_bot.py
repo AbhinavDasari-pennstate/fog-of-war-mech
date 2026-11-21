@@ -760,6 +760,16 @@ class TestEdgeCases(Base):
         bot.act(obs)
         self.assertGreater(bot.detour, 0)
 
+    def test_a_wide_detour_never_heads_away_from_the_zone(self):
+        """Outside the zone a repeat detour keeps the first, narrow angle: at 2.4 rad it boosted away from the
+        centre (red team on 470ca16). The move must still have a component toward the centre."""
+        bot = Bot(HELLO)
+        bot.detour, bot.detour_lvl, bot.detour_sign = 10, 3, 1
+        obs = make_obs(tick=1, t=40.0, pos=(700, 0, 0), in_zone=False, vel=(0, 0, 0))
+        a = bot.act(obs)
+        self.assertEqual(problems(obs, a), [])
+        self.assertLess(a["move"][0], 0)  # centre is at -x
+
     def test_missing_optional_keys_do_not_crash(self):
         obs = make_obs(mechs=[{"id": 5, "kind": "mech", "pos": [50, 0, 0]}])
         for k in ("projectiles", "crates", "beams", "drops"):
