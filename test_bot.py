@@ -745,6 +745,21 @@ class TestEdgeCases(Base):
         self.assertGreater(bot.detour, 0)
         self.assertLessEqual(tick, 7)  # 3 slow steps, the jump, landing: detour
 
+    def test_a_detour_does_not_restart_in_mid_air(self):
+        """A detour that runs out while we are airborne (stuck count frozen at 4+) must not start a new one until we land:
+        restarting in the air kept jetting until energy hit 0 (red team M1, sim seed 700039)."""
+        bot = Bot(HELLO)
+        pk = [pickup(1, "laser", (60, 0, 0))]
+        bot.stuck, bot.detour = 5, 0
+        obs = make_obs(tick=1, t=40.0, pickups=pk, vel=(11, 0, 0), grounded=False)
+        a = bot.act(obs)
+        self.assertEqual(problems(obs, a), [])
+        self.assertEqual(bot.detour, 0)
+        self.assertFalse(a.get("boost"))
+        obs = make_obs(tick=2, t=40.1, pickups=pk, vel=(0, 0, 0), grounded=True)  # landed and still slow: detour
+        bot.act(obs)
+        self.assertGreater(bot.detour, 0)
+
     def test_missing_optional_keys_do_not_crash(self):
         obs = make_obs(mechs=[{"id": 5, "kind": "mech", "pos": [50, 0, 0]}])
         for k in ("projectiles", "crates", "beams", "drops"):

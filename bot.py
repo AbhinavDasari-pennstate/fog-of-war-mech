@@ -782,7 +782,7 @@ class Bot:
         speed = math.hypot(me["vel"][0], me["vel"][1])
         if me["grounded"]:  # airborne (our own stuck jump) keeps the count, so a failed jump leads to the detour
             self.stuck = self.stuck + 1 if want and speed < 2.0 else 0
-        if self.stuck >= 4 and self.detour == 0:
+        if self.stuck >= 4 and self.detour == 0 and me["grounded"]:  # start only on the ground: a mid-air restart jets the bar empty
             if t - self.detour_end < 4.0:  # the last detour did not get us round: try the other side
                 self.detour_sign = -self.detour_sign
             else:  # a new obstacle: go round on the side with more room
