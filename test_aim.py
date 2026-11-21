@@ -781,6 +781,14 @@ class TestFireGate(unittest.TestCase):
         sol = aim.solve(me, tgt, "laser", LASER, CONFIG)
         self.assertEqual(aim.fire_decision(me, tgt, me["weapons"][1], sol, CONFIG), (False, "cooldown"))
 
+    def test_laser_waits_for_full_charge_on_target(self):
+        tgt = make_target(pos=(100.0, 0.0, 0.0))
+        full = LASER.get("charge", 0.75)
+        for charge, want in ((0.92 * full, (True, "charging")), (full, (False, "release"))):
+            me = make_me(aim_=(0.0, 0.0), weapons=[None, laser_weapon(charge=charge)])
+            sol = aim.solve(me, tgt, "laser", LASER, CONFIG)
+            self.assertEqual(aim.fire_decision(me, tgt, me["weapons"][1], sol, CONFIG), want, charge)
+
     def test_laser_releases_across_the_pi_wrap_on_actual_aim(self):
         for b in BEARINGS:
             tgt = make_target(pos=(100.0 * math.cos(b), 100.0 * math.sin(b), 0.0))

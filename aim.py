@@ -39,6 +39,7 @@ BUCKET_MID_M = (25.0, 60.0, 130.0)
 
 GUN_MIN_P = 0.35
 LASER_RELEASE_P = 0.6
+LASER_RELEASE_FRAC = 1.0  # release only at this fraction of full charge (was 0.9: 93.5% damage for 0.075 s saved)
 LASER_START_P = 0.35
 LIGHTNING_MIN_ENERGY = 20.0
 SIGMA_FLOOR_M = 0.15
@@ -777,7 +778,7 @@ def fire_decision(me, target, weapon, sol, config=None, los_fn=None, hide=False,
             return True, "charging"
         if _laser_held(weapon, cfg, held_full_s) >= hold - 0.15:
             return False, "release_hold_limit"
-        if charge >= 0.9 * full and sol.hit_prob >= LASER_RELEASE_P and sol.inside and sol.in_range and clear():
+        if charge >= LASER_RELEASE_FRAC * full - 0.01 and sol.hit_prob >= LASER_RELEASE_P and sol.inside and sol.in_range and clear():
             return False, "release"
         return True, "charging"
     if kind == "lightning":
