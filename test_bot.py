@@ -13,6 +13,8 @@ import tempfile
 import time
 import unittest
 
+import shotline
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import bot as botmod  # noqa: E402
@@ -1394,7 +1396,7 @@ class TestRealMapCost(unittest.TestCase):
                 self.assertEqual(problems(obs, a), [])
         self.assertEqual(bot.errors, 0)
         self.assertEqual(bot.aim_errors, 0)
-        self.assertLessEqual(most_calls, 6)  # a few lines of fire per decision, not one per mech
+        self.assertLessEqual(most_calls, 6 + shotline.RAY_CAP)  # a few lines of fire, plus shotline's capped search
         self.assertLess(max(times), 10.0, f"slowest decision {max(times):.2f} ms")
         print(f"\nreal map, 16 mechs: max {max(times):.2f} ms, most ray calls {most_calls}", file=sys.stderr)
 
@@ -1842,7 +1844,7 @@ class TestMainEntrypoint(unittest.TestCase):
         self.assertIn('ENTRYPOINT ["python3", "-u", "/bot/bot.py"]', text)
         copy_lines = [l for l in text.splitlines() if l.startswith("COPY ")]
         self.assertEqual(len(copy_lines), 1)
-        for name in ("mechfight.py", "bot.py", "aim.py", "ray.py", "fight.py", "chase.py", "economy.py"):
+        for name in ("mechfight.py", "bot.py", "aim.py", "ray.py", "fight.py", "chase.py", "economy.py", "shotline.py"):
             self.assertIn(name, copy_lines[0].split())
         with open(os.path.join(HERE, "bot.py")) as f:
             self.assertIn('if __name__ == "__main__":', f.read())
