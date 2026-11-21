@@ -19,10 +19,6 @@ try:
 except Exception:  # pickup memory missing: obs pickups only
     lootlib = None
 try:
-    import shotline as shotlib
-except Exception:  # module missing or broken: no peeking
-    shotlib = None
-try:
     import chase as chaselib
 except Exception:  # chase module missing or broken: no chasing
     chaselib = None
@@ -149,9 +145,6 @@ class Bot:
         self.loot_errors = 0
         self.fight_errors = 0
         self.chaser = chaselib.Chase() if chaselib is not None else None
-        self.shot = shotlib.ShotLine() if shotlib is not None else None  # peek to a line when nothing is shootable
-        self.shot_errors = 0
-        self.shot_mode = None
         self.chase_errors = 0
         self.eco = economy.Economy() if economy is not None else None
 
@@ -858,33 +851,6 @@ class Bot:
             ax, ay, az = cp["aim_at"]  # track dropped: look where it was going
             aim_cmd = [math.atan2(ay - y, ax - x),
                        math.atan2(az - z - me["stats"].get("muzzle_height", 7), max(math.hypot(ax - x, ay - y), 1.0))]
-        # ---- nothing shootable, a target we fight behind cover: walk to a peek spot (shotline.py). Movement only:
-        # any aim-module shot (a fire flag, or any mech in a clear line) wins; so do the zone, flee, hiding, a chase,
-        # a dodge, a drop capture, a weapon walk and economy's loot or rest ----
-        if self.shot is not None and not self.lite and raylib is not None and self.shot_errors == 0:
-            busy = urgent or flee or hiding or cp is not None or dodging or capturing or grab is not None \
-                or loot is not None or rest
-            # the aim module's target is a mech in a clear line whenever one exists (bot.py target fix), so its
-            # (cached) line stands for "any mech in a clear line"
-            shootable = any(fire) or (target is not None and target.get("kind") == "mech" and self.los_clear(me, target))
-            if busy:
-                self.shot.reset()
-            elif not shootable or (self.shot.mode == "peek" and not any(fire)):  # out on a peek, not firing:
-                # step() decides whether to step back to reload (a clear line there makes us "shootable")
-                try:
-                    st_ = target if target is not None and target.get("kind") == "mech" else (mechs[0] if mechs else None)
-                    pm = self.shot.step(t, me, st_, [m for m in mechs if m is not st_], raylib.clear, raylib.ground,
-                                        engaged=st_ is not None and self._fighting(st_, t))
-                    if pm is not None:
-                        act["move"] = [float(pm[0]), float(pm[1])]
-                        act["boost"] = False  # a peek walks (spots are picked at walk speed; boost is loud)
-                except Exception:
-                    self.shot_errors += 1
-                    self.shot.reset()
-                    mf.log(f"shotline failed, peeking off from now on: {traceback.format_exc()}")
-            if self.shot.mode != self.shot_mode:  # stderr: one line when a peek starts or steps back
-                mf.log(f"t={t:.1f} peek {self.shot_mode} -> {self.shot.mode}")
-                self.shot_mode = self.shot.mode
         if aim_cmd is None:
             aim_cmd = self._idle_aim(me, t, hit_recent, empty, grab, mx, my, n)
         act["aim"] = [float(aim_cmd[0]), float(aim_cmd[1])]
