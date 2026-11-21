@@ -13,6 +13,7 @@ CHASE_HOLD_RANGE = 60.0    # this close with a clear line: stop advancing
 CHASE_BOOST_RANGE = 120.0  # boost when farther than this...
 DENY_S = 3.5               # ...or when our last hit on it is this old (regen starts at 5 s)
 CHASE_BOOST_ENERGY = 30.0  # keep this much energy for jumps
+ZONE_EDGE = 25.0           # drop when the prey is this close to the zone edge (bot.py turns urgent there)
 EYE, CENTRE = 8.0, 4.5
 
 
@@ -43,9 +44,9 @@ class Chase:
         self.prey = None
         return None
 
-    def plan(self, t, me, mechs, hit_on, hit_by, zone, clear):
-        """me: obs self; mechs: enemy mechs on the track list; hit_on / hit_by: id -> time of the last hit
-        we dealt / took (hit_on times the boost); zone: obs zone; clear: ray.clear(a, b) -> bool."""
+    def plan(self, t, me, mechs, hit_on, zone, clear):
+        """me: obs self; mechs: enemy mechs on the track list; hit_on: id -> time of our last hit on it
+        (times the boost); zone: obs zone; clear: ray.clear(a, b) -> bool."""
         x, y, z = me["pos"]
         armed = any(isinstance(w, dict) and w.get("kind") == "laser" for w in (me.get("weapons") or []))
         if not armed:
@@ -72,8 +73,8 @@ class Chase:
         if t - pt > CHASE_LOST_S:
             return self._drop()  # lost it
         cx, cy, r = _circle(zone, t)
-        if math.hypot(px - cx, py - cy) > r:
-            return self._drop()  # it left the zone: do not follow it out
+        if math.hypot(px - cx, py - cy) > r - ZONE_EDGE:
+            return self._drop()  # it is leaving the zone: do not follow it to the edge
         d = math.hypot(px - x, py - y)
         if track is None and d < 8.0:
             return self._drop()  # reached where it was and it is not here

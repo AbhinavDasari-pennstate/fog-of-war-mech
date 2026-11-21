@@ -27,7 +27,7 @@ def clear_all(a, b, *args):
 
 
 def plan(c, t, mechs, hit_on=None, my=None, zone=None, clear=clear_all):
-    return c.plan(t, my or me(), mechs, hit_on or {}, {}, zone or ZONE, clear)
+    return c.plan(t, my or me(), mechs, hit_on or {}, zone or ZONE, clear)
 
 
 class ChaseUnit(unittest.TestCase):
@@ -47,13 +47,13 @@ class ChaseUnit(unittest.TestCase):
         coming["vel"] = [-10, 0, 0]
         c = Chase()
         self.assertIsNotNone(plan(c, 30.0, [coming], {5: 29.0}))
-        p = c.plan(30.5, me(), [coming, hunter(6, (0, 150, 0), hp=1400)], {5: 29.0}, {6: 30.4, None: 30.4},
+        p = c.plan(30.5, me(), [coming, hunter(6, (0, 150, 0), hp=1400)], {5: 29.0},
                    ZONE, clear_all)
         self.assertEqual(p["id"], 5)
 
     def test_prey_outside_current_zone_circle_aborts(self):
-        self.assertIsNone(plan(Chase(), 30.0, [hunter(5, (565, 0, 0))], {5: 29.0}, me(pos=(440, 0, 0))))
-        self.assertIsNotNone(plan(Chase(), 30.0, [hunter(5, (555, 0, 0))], {5: 29.0}, me(pos=(440, 0, 0))))
+        self.assertIsNone(plan(Chase(), 30.0, [hunter(5, (540, 0, 0))], {5: 29.0}, me(pos=(440, 0, 0))))
+        self.assertIsNotNone(plan(Chase(), 30.0, [hunter(5, (530, 0, 0))], {5: 29.0}, me(pos=(440, 0, 0))))
         z = dict(ZONE, next_radius=100, shrink_start=30, shrink_end=32)  # next circle does not matter
         self.assertIsNotNone(plan(Chase(), 30.0, [hunter(5, (150, 0, 0))], {5: 29.0}, zone=z))
     def test_wounded_fought_hunter_is_chased(self):
@@ -85,7 +85,7 @@ class ChaseUnit(unittest.TestCase):
     def test_reached_last_position_and_gone_ends_chase(self):
         c = Chase()
         plan(c, 30.0, [hunter(5, (150, 0, 0))], {5: 29.0})
-        self.assertIsNone(c.plan(31.0, me(pos=(148, 0, 0)), [], {5: 29.0}, {}, ZONE, clear_all))
+        self.assertIsNone(c.plan(31.0, me(pos=(148, 0, 0)), [], {5: 29.0}, ZONE, clear_all))
 
     def test_close_with_clear_line_holds_position(self):
         p = plan(Chase(), 30.0, [hunter(5, (chase.CHASE_HOLD_RANGE - 5, 0, 0))], {5: 29.0})
@@ -203,6 +203,11 @@ class ChaseInBot(unittest.TestCase):
         b = Bot(HELLO)
         a = b.act(self.obs(30.0, [hunter(5, (100, 0, 0))], [self.HIT], hp=500))
         self.assertLessEqual(a["move"][0], 1e-6)  # fight.py's rule under 45% HP still holds
+
+    def test_no_sideways_chase_boost_when_low_hp_rule_projects_the_move(self):
+        b = Bot(HELLO)
+        a = b.act(self.obs(30.0, [hunter(5, (100, 0, 0)), hunter(6, (40, 80, 0), hp=1400)], hp=500))  # no hit yet: boost due
+        self.assertFalse(a["boost"])
 
     def test_bot_without_chase_module_keeps_v3(self):
         import bot as botmod
